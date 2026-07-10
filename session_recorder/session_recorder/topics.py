@@ -123,19 +123,81 @@ def _merge_streams(user_streams: dict | None) -> dict:
     return resolved
 
 
-def kinect_setup(cameras: list[dict]) -> dict[str, list[str]]:
-    """Kinect colour goes to video; PNG depth/IR + camera_info go to the bag."""
-    color_topics: list[str] = []
+DEFAULT_KINECT_STREAMS = {
+    "color": {"enabled": True, "resolution": "qhd", "mode": "raw", "fps": 30},
+    "depth": {"enabled": True, "resolution": "qhd", "mode": "compressed"},
+    "ir": {"enabled": True, "mode": "compressed"},
+}
+
+KINECT_COLOR_RESOLUTIONS = {"qhd", "hd", "sd"}
+KINECT_DEPTH_RESOLUTIONS = {"qhd", "hd"}
+
+
+def kinect_setup(cameras: list[dict], kinect_cfg: dict | None) -> dict:
+    user_streams = (kinect_cfg or {}).get("streams", {}) or {}
+    streams = {}
+    for name, defaults in DEFAULT_KINECT_STREAMS.items():
+        merged = dict(defaults)
+        merged.update(user_streams.get(name, {}) or {})
+        streams[name] = merged
+
+    raw_topics: list[str] = []
+    compressed_topics: list[str] = []
+    fps_overrides: list[str] = []
     bag_topics: list[str] = []
+
     for cam in cameras:
         ns = cam["name"]
-        color_topics.append(f"/{ns}/qhd/image_color_rect")
-        bag_topics += [
-            f"/{ns}/qhd/image_depth_rect/compressed",
-            f"/{ns}/sd/image_ir_rect/compressed",
-            f"/{ns}/qhd/camera_info",
-        ]
-    return {"color_topics": color_topics, "bag_topics": bag_topics}
+
+        sc = streams["color"]
+        if sc.get("enabled", True):
+            res = str(sc.get("resolution", "qhd"))
+            if res not in KINECT_COLOR_RESOLUTIONS:
+                raise ValueError(
+                    f"Kinect {ns}: color resolution '{res}' not valid. "
+                    f"Choose from: {sorted(KINECT_COLOR_RESOLUTIONS)}"
+                )
+            base = f"/{ns}/{res}/image_color_rect"
+            topic = f"{base}/compressed" if sc.get("mode") == "compressed" else base
+            if sc.get("mode") == "compressed":
+                compressed_topics.append(topic)
+            else:
+                raw_topics.append(topic)
+            fps = sc.get("fps")
+            if fps:
+                fps_overrides.append(f"{topic}:{fps}")
+
+        sd = streams["depth"]
+        if sd.get("enabled", True):
+            res = str(sd.get("resolution", "qhd"))
+            if res not in KINECT_DEPTH_RESOLUTIONS:
+                raise ValueError(
+                    f"Kinect {ns}: depth resolution '{res}' not valid. "
+                    f"Choose from: {sorted(KINECT_DEPTH_RESOLUTIONS)}"
+                )
+            depth_base = f"/{ns}/{res}/image_depth_rect"
+            if sd.get("mode") == "compressed":
+                bag_topics.append(f"{depth_base}/compressed")
+            else:
+                bag_topics.append(depth_base)
+
+        si = streams["ir"]
+        if si.get("enabled", True):
+            ir_base = f"/{ns}/sd/image_ir_rect"
+            if si.get("mode") == "compressed":
+                bag_topics.append(f"{ir_base}/compressed")
+            else:
+                bag_topics.append(ir_base)
+
+        res = streams["color"].get("resolution", "qhd")
+        bag_topics.append(f"/{ns}/{res}/camera_info")
+
+    return {
+        "color_topics": raw_topics,
+        "color_compressed_topics": compressed_topics,
+        "topic_fps_overrides": fps_overrides,
+        "bag_topics": bag_topics,
+    }
 
 
 def realsense_setup(cameras: list[dict], user_streams: dict | None) -> dict:
@@ -260,9 +322,16 @@ def build_recording_setup(
         "bag_regex": "",
     }
 
-    kinect = kinect_setup(recorded_cameras(kinect_cfg))
-    setup["color_topics"] += kinect["color_topics"]
-    setup["bag_topics"] += kinect["bag_topics"]
+    kinect = kinect_setup(
+        recorded_cameras(kinect_cfg), recording_settings.get("kinect")
+    )
+    for key in (
+        "color_topics",
+        "color_compressed_topics",
+        "topic_fps_overrides",
+        "bag_topics",
+    ):
+        setup[key] += kinect.get(key, [])
 
     realsense = realsense_setup(
         recorded_cameras(realsense_cfg), recording_settings.get("streams")

@@ -45,6 +45,32 @@ recording_settings:
   # spikes; raise for slow drives, lower if RAM is tight. (Kinect manager)
   bag_cache_size_mb: 128
 
+  # ───────────────────────── Kinect per-stream settings ────────────────────
+  # Applied to every Kinect v2 camera with record: true.
+  #   enabled    : record this stream
+  #   resolution : color → qhd(960×540) | hd(1920×1080) | sd(512×424)
+  #                depth → qhd | hd
+  #                ir is always sd (512×424)
+  #   mode       : "raw" subscribes to the uncompressed topic and re-encodes
+  #                (color → H.265 video, depth/ir → raw 16-bit in bag).
+  #                "compressed" uses the bridge's built-in compression
+  #                (color → JPEG passthrough to video, depth/ir → PNG in bag).
+  #   fps        : (color only) target video frame rate.
+  kinect:
+    streams:
+      color:
+        enabled: true
+        resolution: "qhd"
+        mode: "raw"
+        fps: 30
+      depth:
+        enabled: true
+        resolution: "qhd"
+        mode: "compressed"
+      ir:
+        enabled: true
+        mode: "compressed"
+
   # ───────────────────────── RealSense per-stream settings ─────────────────
   # Applied to every RealSense camera with record: true.
   #   enabled : record this stream
