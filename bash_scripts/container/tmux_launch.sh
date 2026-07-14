@@ -39,5 +39,7 @@ launch_window "rviz" "rviz2 -d \$(ros2 pkg prefix kinect2_bridge)/share/kinect2_
 # Unified recording manager (service-driven — use 'start'/'stop' aliases to control)
 launch_window "record" "ros2 launch session_recorder unified_recording.launch.py"
 
+launch_window "health" "ros2 run session_recorder topic_health_monitor"
+
 tmux select-window -t "$SESSION:0"
 tmux attach -t "$SESSION"

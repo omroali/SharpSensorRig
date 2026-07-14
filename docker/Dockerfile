@@ -100,7 +100,9 @@ RUN apt-get update && \
     ocl-icd-opencl-dev \
     opencl-headers \
     ocl-icd-libopencl1 \
-    clinfo && \
+    clinfo \
+    python3-uvicorn \
+    python3-fastapi && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://github.com/OpenKinect/libfreenect2.git

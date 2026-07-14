@@ -18,6 +18,35 @@ def topic_to_filename(topic: str) -> str:
     return topic.strip("/").replace("/", "_")
 
 
+# ffmpeg is told a fixed mux rate (`-r`/`-framerate`) and has no visibility
+# into real frame timing, so if the sensor can't sustain the configured fps
+# (e.g. a Kinect starved of USB bandwidth) the encoded video plays back
+# faster than real time - fewer real frames get stamped as if they arrived
+# at the full configured rate. To avoid that, each recorder holds the first
+# few seconds of (post-throttle) frames back, measures the rate they're
+# actually arriving at, and muxes at whichever of {configured, measured} is
+# lower - never faster than what the sensor is really delivering.
+CALIBRATION_MIN_FRAMES = 10
+CALIBRATION_WINDOW_S = 2.0
+CALIBRATION_MAX_WAIT_S = 5.0
+
+
+def measured_fps(timestamps_ns: list[int]) -> float:
+    if len(timestamps_ns) < 2:
+        return 0.0
+    span_s = (timestamps_ns[-1] - timestamps_ns[0]) / 1e9
+    return (len(timestamps_ns) - 1) / span_s if span_s > 0 else 0.0
+
+
+def calibration_done(timestamps_ns: list[int]) -> bool:
+    if len(timestamps_ns) < 2:
+        return False
+    elapsed = (timestamps_ns[-1] - timestamps_ns[0]) / 1e9
+    if len(timestamps_ns) >= CALIBRATION_MIN_FRAMES and elapsed >= CALIBRATION_WINDOW_S:
+        return True
+    return elapsed >= CALIBRATION_MAX_WAIT_S
+
+
 class StreamRecorder:
     def __init__(
         self,
@@ -60,6 +89,8 @@ class StreamRecorder:
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps > 0 else 0
         self._next_emit_ts_ns = 0
         self._stderr_file = None
+        self._calibrating = True
+        self._calib_frames: list[tuple[bytes, int, int, int]] = []
         self._worker = threading.Thread(target=self._writer_loop, daemon=True)
         self._worker.start()
 
@@ -115,7 +146,7 @@ class StreamRecorder:
             out[row * row_bytes : (row + 1) * row_bytes] = data[start:end]
         return bytes(out)
 
-    def _start(self, width: int, height: int, pixel_fmt: str):
+    def _start(self, width: int, height: int, pixel_fmt: str, mux_fps: float):
         self._csv_file = open(self._csv_path, "w", newline="")
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
@@ -150,7 +181,7 @@ class StreamRecorder:
             "-s",
             f"{width}x{height}",
             "-r",
-            str(self._fps),
+            str(mux_fps),
             "-i",
             "pipe:0",
             *encoder_args,
@@ -162,7 +193,8 @@ class StreamRecorder:
         self.logger.info(
             f"[{self.topic}] Starting ffmpeg -> {self._video_path}\n"
             f"  encoder={self._encoder} crf={self._crf} "
-            f"{width}x{height} @ {self._fps}fps pixel_fmt={pixel_fmt}"
+            f"{width}x{height} @ {mux_fps}fps (configured {self._fps}fps) "
+            f"pixel_fmt={pixel_fmt}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
@@ -186,17 +218,41 @@ class StreamRecorder:
                     return
                 self._next_emit_ts_ns += self._frame_interval_ns
 
-            if not self._started:
-                pixel_fmt = self._pixel_fmt_from_encoding(msg.encoding)
-                self._start(msg.width, msg.height, pixel_fmt)
-
             buffer = self._normalize_buffer(msg)
 
+            if self._calibrating:
+                self._calib_frames.append((buffer, ts_ns, msg.width, msg.height))
+                if not calibration_done([f[1] for f in self._calib_frames]):
+                    return
+                self._calibrating = False
+                mux_fps = measured_fps([f[1] for f in self._calib_frames])
+                if mux_fps <= 0:
+                    mux_fps = self._fps
+                else:
+                    mux_fps = min(self._fps, round(mux_fps, 2))
+                    if mux_fps < self._fps:
+                        self.logger.warn(
+                            f"[{self.topic}] Configured {self._fps}fps but only "
+                            f"measured {mux_fps}fps arriving; muxing at the "
+                            "measured rate to keep playback speed correct."
+                        )
+                pixel_fmt = self._pixel_fmt_from_encoding(msg.encoding)
+                self._start(msg.width, msg.height, pixel_fmt, mux_fps)
+                pending = self._calib_frames
+                self._calib_frames = []
+                cap_pending = False
+            elif not self._started:
+                return  # unreachable once calibration has run, but guards ordering
+            else:
+                pending = [(buffer, ts_ns, msg.width, msg.height)]
+                cap_pending = True
+
         with self._cv:
-            if len(self._frames) >= self._max_queue:
-                self._frames.popleft()
-                self._dropped += 1
-            self._frames.append((buffer, ts_ns, msg.width, msg.height))
+            for frame in pending:
+                if cap_pending and len(self._frames) >= self._max_queue:
+                    self._frames.popleft()
+                    self._dropped += 1
+                self._frames.append(frame)
             self._cv.notify()
 
     def _writer_loop(self):
@@ -304,10 +360,12 @@ class CompressedStreamRecorder:
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps > 0 else 0
         self._next_emit_ts_ns = 0
         self._stderr_file = None
+        self._calibrating = True
+        self._calib_frames: list[tuple[bytes, int]] = []
         self._worker = threading.Thread(target=self._writer_loop, daemon=True)
         self._worker.start()
 
-    def _start(self, fmt_hint: str):
+    def _start(self, fmt_hint: str, mux_fps: float):
         self._csv_file = open(self._csv_path, "w", newline="")
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
@@ -336,7 +394,7 @@ class CompressedStreamRecorder:
             "-f",
             "image2pipe",
             "-framerate",
-            str(self._fps),
+            str(mux_fps),
             "-vcodec",
             "mjpeg",
             "-i",
@@ -349,7 +407,8 @@ class CompressedStreamRecorder:
 
         self.logger.info(
             f"[{self.topic}] Starting ffmpeg (compressed) -> {self._video_path}\n"
-            f"  encoder={self._encoder} crf={self._crf} input_format={fmt_hint}"
+            f"  encoder={self._encoder} crf={self._crf} @ {mux_fps}fps "
+            f"(configured {self._fps}fps) input_format={fmt_hint}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
@@ -373,22 +432,46 @@ class CompressedStreamRecorder:
                     return
                 self._next_emit_ts_ns += self._frame_interval_ns
 
-            if not self._started:
+            buffer = bytes(msg.data)
+
+            if self._calibrating:
+                self._calib_frames.append((buffer, ts_ns))
+                if not calibration_done([f[1] for f in self._calib_frames]):
+                    return
+                self._calibrating = False
+                mux_fps = measured_fps([f[1] for f in self._calib_frames])
+                if mux_fps <= 0:
+                    mux_fps = self._fps
+                else:
+                    mux_fps = min(self._fps, round(mux_fps, 2))
+                    if mux_fps < self._fps:
+                        self.logger.warn(
+                            f"[{self.topic}] Configured {self._fps}fps but only "
+                            f"measured {mux_fps}fps arriving; muxing at the "
+                            "measured rate to keep playback speed correct."
+                        )
                 fmt = msg.format.lower() if msg.format else ""
                 if "jpeg" not in fmt and "jpg" not in fmt:
                     self.logger.warn(
                         f"[{self.topic}] format='{msg.format}' is not JPEG; "
                         "ffmpeg may fail to decode."
                     )
-                self._start(msg.format or "unknown")
-
-            buffer = bytes(msg.data)
+                self._start(msg.format or "unknown", mux_fps)
+                pending = self._calib_frames
+                self._calib_frames = []
+                cap_pending = False
+            elif not self._started:
+                return  # unreachable once calibration has run, but guards ordering
+            else:
+                pending = [(buffer, ts_ns)]
+                cap_pending = True
 
         with self._cv:
-            if len(self._frames) >= self._max_queue:
-                self._frames.popleft()
-                self._dropped += 1
-            self._frames.append((buffer, ts_ns))
+            for frame in pending:
+                if cap_pending and len(self._frames) >= self._max_queue:
+                    self._frames.popleft()
+                    self._dropped += 1
+                self._frames.append(frame)
             self._cv.notify()
 
     def _writer_loop(self):

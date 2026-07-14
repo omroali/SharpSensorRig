@@ -13,6 +13,7 @@ Each take lands in a single session directory:
 
 import os
 import random
+import shutil
 import signal
 import socket
 import subprocess
@@ -21,9 +22,12 @@ import time
 from datetime import datetime
 
 import rclpy
+import yaml
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
+
+from session_recorder.topics import parse_expected_entry
 
 
 class RecordingManager(Node):
@@ -38,6 +42,13 @@ class RecordingManager(Node):
         self.declare_parameter("topic_fps_overrides", Parameter.Type.STRING_ARRAY)
         self.declare_parameter("bag_topics", Parameter.Type.STRING_ARRAY)
         self.declare_parameter("bag_regex", "")
+        self.declare_parameter("bag_exclude_regex", "")
+        self.declare_parameter("bag_throttles", Parameter.Type.STRING_ARRAY)
+        self.declare_parameter("expected_topics", Parameter.Type.STRING_ARRAY)
+        self.declare_parameter("expected_regex", Parameter.Type.STRING_ARRAY)
+        self.declare_parameter("calib_source_dirs", Parameter.Type.STRING_ARRAY)
+        self.declare_parameter("session_check_enabled", True)
+        self.declare_parameter("session_check_min_rate_factor", 0.5)
         self.declare_parameter("video_encoder", "hevc_nvenc")
         self.declare_parameter("video_crf", 18)
         self.declare_parameter("video_fps", 30.0)
@@ -60,6 +71,15 @@ class RecordingManager(Node):
             dict.fromkeys(str(t) for t in self.get_parameter("bag_topics").value if t)
         )
         self._bag_regex = str(self.get_parameter("bag_regex").value)
+        self._bag_exclude_regex = str(self.get_parameter("bag_exclude_regex").value)
+        self._bag_throttles = [str(t) for t in self.get_parameter("bag_throttles").value if t]
+        self._expected_topics = [str(t) for t in self.get_parameter("expected_topics").value if t]
+        self._expected_regex = [str(t) for t in self.get_parameter("expected_regex").value if t]
+        self._calib_source_dirs = [str(t) for t in self.get_parameter("calib_source_dirs").value if t]
+        self._session_check_enabled = bool(self.get_parameter("session_check_enabled").value)
+        self._session_check_min_rate_factor = float(
+            self.get_parameter("session_check_min_rate_factor").value
+        )
         self._video_encoder = str(self.get_parameter("video_encoder").value)
         self._video_crf = int(self.get_parameter("video_crf").value)
         self._video_fps = float(self.get_parameter("video_fps").value)
@@ -84,10 +104,13 @@ class RecordingManager(Node):
         self._lock = threading.Lock()
         self._active = False
         self._session_dir = ""
+        self._session_start = 0.0
         self._color_proc = None
         self._bag_proc = None
+        self._throttle_proc = None
         self._color_log = None
         self._bag_log = None
+        self._throttle_log = None
         self._nexus_capture = bool(self.get_parameter("nexus_capture").value)
         self._nexus_host = str(self.get_parameter("nexus_host").value)
         self._nexus_port = int(self.get_parameter("nexus_port").value)
@@ -104,6 +127,10 @@ class RecordingManager(Node):
             f"  fps_overrides     : {self._topic_fps_overrides}\n"
             f"  bag_topics        : {self._bag_topics}\n"
             f"  bag_regex         : {self._bag_regex or '<none>'}\n"
+            f"  bag_exclude_regex : {self._bag_exclude_regex or '<none>'}\n"
+            f"  bag_throttles     : {self._bag_throttles or '<none>'}\n"
+            f"  calib_snapshots   : {self._calib_source_dirs or '<none>'}\n"
+            f"  session_check     : {self._session_check_enabled}\n"
             f"  output_root       : {self._output_root}\n"
             f"  participant       : {self._participant_id}\n"
             f"  encoder           : {self._video_encoder}\n"
@@ -188,25 +215,104 @@ class RecordingManager(Node):
             ]
         if self._bag_regex:
             cmd += ["--regex", self._bag_regex]
+        if self._bag_exclude_regex:
+            cmd += ["--exclude-regex", self._bag_exclude_regex]
         if self._bag_topics:
             cmd += ["--topics", *self._bag_topics]
         return cmd
+
+    def _build_throttle_cmd(self) -> list[str]:
+        throttles = "[" + ",".join(self._bag_throttles) + "]"
+        return [
+            "ros2", "run", "session_recorder", "topic_throttle",
+            "--ros-args", "-p", f"throttles:={throttles}",
+        ]
+
+    def _write_manifest(self, session_dir: str):
+        """Persist what this session is supposed to contain; session_check
+        and post-hoc tooling validate the recorded data against this."""
+        expected = []
+        for entry in self._expected_topics:
+            topic, hz, sink = parse_expected_entry(entry)
+            expected.append({"topic": topic, "expected_hz": hz, "sink": sink})
+        expected_regex = []
+        for entry in self._expected_regex:
+            regex, hz_str = entry.split("|")
+            expected_regex.append(
+                {"regex": regex, "expected_hz": float(hz_str) if hz_str else None}
+            )
+        manifest = {
+            "session": {
+                "participant": self._participant_id,
+                "started": datetime.now().isoformat(timespec="seconds"),
+                "min_rate_factor": self._session_check_min_rate_factor,
+            },
+            "expected_topics": expected,
+            "expected_regex": expected_regex,
+            "bag_exclude_regex": self._bag_exclude_regex,
+        }
+        path = os.path.join(session_dir, "expected_topics.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(manifest, handle, sort_keys=False)
+
+    def _snapshot_calibration(self, session_dir: str):
+        """Copy each sensor's calibration files (intrinsics + depth<->colour
+        extrinsics) into the session so recorded raw streams stay
+        rectifiable/registrable offline, whatever happens to the rig."""
+        for src in self._calib_source_dirs:
+            if not os.path.isdir(src):
+                self.get_logger().warn(f"Calibration dir missing, not snapshotted: {src}")
+                continue
+            dst = os.path.join(session_dir, "calibration", os.path.basename(src))
+            try:
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            except OSError as exc:
+                self.get_logger().warn(f"Calibration snapshot failed for {src}: {exc}")
+
+    def _run_session_check(self, session_dir: str) -> str:
+        """Run the post-session sanity check; returns a one-line summary."""
+        if not self._session_check_enabled or not session_dir:
+            return ""
+        cmd = ["ros2", "run", "session_recorder", "session_check", session_dir]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120.0
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.get_logger().error(f"session_check failed to run: {exc}")
+            return "session_check: FAILED TO RUN"
+        summary = (result.stdout or "").strip().splitlines()
+        summary = summary[-1] if summary else ""
+        if result.returncode == 0:
+            self.get_logger().info(f"session_check PASS: {summary}")
+            return f"session_check: PASS ({summary})"
+        self.get_logger().error(
+            f"session_check FAIL: {summary}\n{result.stdout}\n{result.stderr}"
+        )
+        return f"session_check: FAIL ({summary}) - see session_report.yaml"
 
     def _stop_processes(self):
         with self._lock:
             color_proc = self._color_proc
             bag_proc = self._bag_proc
+            throttle_proc = self._throttle_proc
             session_dir = self._session_dir
             color_log = self._color_log
             bag_log = self._bag_log
+            throttle_log = self._throttle_log
             self._active = False
             self._color_proc = None
             self._bag_proc = None
+            self._throttle_proc = None
             self._session_dir = ""
             self._color_log = None
-        self._bag_log = None
+            self._bag_log = None
+            self._throttle_log = None
 
-        for proc in (color_proc, bag_proc):
+        # Recorders first so they drain cleanly; the throttle relay last so
+        # the bag never waits on topics whose upstream has already vanished.
+        procs = (color_proc, bag_proc, throttle_proc)
+        for proc in procs:
             if proc is None:
                 continue
             try:
@@ -215,7 +321,7 @@ class RecordingManager(Node):
                 pass
 
         deadline = time.time() + 30.0
-        for proc in (color_proc, bag_proc):
+        for proc in procs:
             if proc is None:
                 continue
             remaining = max(0.0, deadline - time.time())
@@ -227,7 +333,7 @@ class RecordingManager(Node):
                 except ProcessLookupError:
                     pass
 
-        for log_file in (color_log, bag_log):
+        for log_file in (color_log, bag_log, throttle_log):
             if log_file is None:
                 continue
             try:
@@ -312,8 +418,19 @@ class RecordingManager(Node):
 
             color_log_path = os.path.join(output_dir, "colour_video_recorder.log")
             bag_log_path = os.path.join(self._session_dir, "rosbag_record.log")
+            throttle_log_path = os.path.join(self._session_dir, "topic_throttle.log")
+
+        self._write_manifest(self._session_dir)
+        self._snapshot_calibration(self._session_dir)
 
         try:
+            if self._bag_throttles:
+                # Start the relays before the bag so the throttled topics
+                # exist by the time discovery runs.
+                self._throttle_proc, self._throttle_log = self._start_process(
+                    self._build_throttle_cmd(),
+                    throttle_log_path,
+                )
             if record_video:
                 self._color_proc, self._color_log = self._start_process(
                     self._build_color_cmd(output_dir),
@@ -361,9 +478,12 @@ class RecordingManager(Node):
         session_dir = self._stop_processes()
         if self._nexus_capture:
             self._nexus_stop()
+        check_summary = self._run_session_check(session_dir)
         self.get_logger().info(f"Recording stopped: {session_dir}")
         response.success = True
         response.message = f"Recording stopped: {session_dir}"
+        if check_summary:
+            response.message += f"\n{check_summary}"
         return response
 
     def destroy_node(self):

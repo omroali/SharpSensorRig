@@ -49,42 +49,72 @@ recording_settings:
   # Applied to every Kinect v2 camera with record: true.
   #   enabled    : record this stream
   #   resolution : color → qhd(960×540) | hd(1920×1080) | sd(512×424)
-  #                depth → qhd | hd
-  #                ir is always sd (512×424)
+  #                depth → sd | qhd | hd   (ir is always sd, 512×424)
+  #   rectified  : true records the bridge's undistorted (_rect) product;
+  #                false records the raw sensor stream. NOTE the sensor only
+  #                measures depth/IR at sd — qhd/hd depth is that same data
+  #                registered into the colour frame and upsampled, so it is
+  #                always rectified. Raw sd + camera_info + the calibration
+  #                snapshot preserve the ability to rectify/register offline
+  #                (and to re-do it better after a future calibration);
+  #                rectified data bakes today's calibration in forever.
+  #                Colour goes to H.265 video where the transform is baked in
+  #                regardless, so it stays rectified for direct use.
   #   mode       : "raw" subscribes to the uncompressed topic and re-encodes
   #                (color → H.265 video, depth/ir → raw 16-bit in bag).
   #                "compressed" uses the bridge's built-in compression
   #                (color → JPEG passthrough to video, depth/ir → PNG in bag).
-  #   fps        : (color only) target video frame rate.
+  #   fps        : color → target video frame rate.
+  #                depth/ir → bag rate; values below the native 30 insert a
+  #                zero-copy throttle relay (topic_throttle) and record
+  #                <topic>/throttled instead. IR is mainly for calibration
+  #                and QA, so 5 Hz saves ~85% of its disk cost.
+  # snapshot_calibration : copy each recorded camera's bridge calibration
+  #                files (intrinsics + depth<->colour extrinsic) into
+  #                <session>/calibration/<serial>/ at capture start.
+  # calibration_dir      : where those per-serial dirs live
+  #                (default $BASE_WS/src/kinect2_ros2/kinect2_bridge/data).
   kinect:
+    snapshot_calibration: true
+    # calibration_dir: "/home/ubuntu/base_ws/src/kinect2_ros2/kinect2_bridge/data"
     streams:
       color:
         enabled: true
         resolution: "qhd"
+        rectified: true
         mode: "raw"
         fps: 30
       depth:
         enabled: true
-        resolution: "qhd"
+        resolution: "sd"
+        rectified: false
         mode: "compressed"
+        fps: 30
       ir:
         enabled: true
+        rectified: false
         mode: "compressed"
+        fps: 5
 
   # ───────────────────────── RealSense per-stream settings ─────────────────
   # Applied to every RealSense camera with record: true.
   #   enabled : record this stream
-  #   mode    : "compressed" subscribes to the camera's JPEG topic (low
-  #             bandwidth, lossy on top of camera compression); "raw"
+  #   mode    : color → "compressed" subscribes to the camera's JPEG topic
+  #             (low bandwidth, lossy on top of camera compression); "raw"
   #             subscribes to the uncompressed topic and re-encodes locally.
-  #             Only "color" supports compressed mode.
-  #   fps     : target recording rate; recorder subsamples on ROS timestamps.
-  streams:
+  #             depth → "compressed" records image_transport's compressedDepth
+  #             (PNG, usb driver only — the PoE firmware publishes no
+  #             compressed depth); "raw" records uncompressed 16-bit frames
+  #             (~55 MB/s per camera at 30 fps — avoid for long sessions).
+  #   fps     : color/IR → video recorder subsamples on ROS timestamps.
+  #             depth → bag rate; below-native values insert a zero-copy
+  #             throttle relay and record <topic>/throttled instead.
+  realsense:
     color:
       enabled: true
       # raw ~46 MB/s vs compressed ~5 MB/s per camera over the network
       mode: "compressed"
-      fps: 30
+      fps: 15
     infrared_1:
       enabled: false
       mode: "raw"
@@ -95,13 +125,22 @@ recording_settings:
       fps: 15
     depth:
       enabled: true
+      mode: "compressed"
+      fps: 15
 
   # ───────────────────────── Vicon ────────────────────────────────────────
   vicon:
     # Whether to record Vicon topics (segments, labeled markers, unlabeled
-    # markers). All topics matching topic_regex are added to the bag.
+    # markers). All topics matching topic_regex are added to the bag,
+    # except those matching exclude_regex. The *_visualization MarkerArray
+    # topics duplicate the PointStamped data (~1.5 GB per 3 h session) and
+    # can be regenerated offline, so they are excluded by default.
     enabled: true
     topic_regex: "/vicon/.*"
+    exclude_regex: "/vicon/.*visualization.*"
+    # Nominal Vicon publish rate; used by session_check and the health
+    # monitor to flag under-delivering topics.
+    expected_hz: 120
 
     # ── Nexus UDP capture trigger ───
     # When enabled, /start_recording and /stop_recording also send UDP
@@ -117,6 +156,8 @@ recording_settings:
   velodyne:
     # Recorded for every unit in velodyne.yaml with record: true.
     # Names are relative to each unit's namespace (/<unit>/<topic>).
+    # expected_hz: nominal spin rate, used by session_check / monitor.
+    expected_hz: 10
     topics:
       - "velodyne_points"     # decoded PointCloud2 — ready to use, large
       # - "velodyne_packets"  # raw UDP packets — ~4x smaller, lossless, but
@@ -129,3 +170,29 @@ recording_settings:
   # channels, etc. Use exact topic names.
   bag_extra_topics:
     - "/sharp/events"
+
+  # ───────────────────────── Session sanity check ─────────────────────────
+  # After /stop_recording, session_check compares the recorded bag + videos
+  # against the expected_topics.yaml manifest written at capture start and
+  # writes <session>/session_report.yaml. A missing sensor or a stream
+  # running below min_rate_factor × its expected rate fails the check, and
+  # the failure is reported in the /stop_recording response.
+  session_check:
+    enabled: true
+    # A stream fails when its recorded rate < expected_hz × this factor.
+    min_rate_factor: 0.5
+
+  # ───────────────────────── Topic health monitor ──────────────────────────
+  # Live web dashboard (topic_health_monitor node) showing per-topic Hz for
+  # every topic the rig is configured to record, plus disk headroom and
+  # session growth. Subscriptions are raw serialized bytes (never
+  # deserialized), so CPU overhead is negligible.
+  monitor:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8765
+    # Sliding window (seconds) for the Hz estimate.
+    window_seconds: 5.0
+    # A topic turns amber below min_rate_factor × expected Hz (red when
+    # silent). Uses the same expected rates as session_check.
+    min_rate_factor: 0.5

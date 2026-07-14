@@ -9,7 +9,13 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch", ["launch/unified_recording.launch.py"]),
+        (
+            f"share/{package_name}/launch",
+            [
+                "launch/unified_recording.launch.py",
+                "launch/health_monitor.launch.py",
+            ],
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -22,6 +28,9 @@ setup(
             "colour_video_recorder = session_recorder.colour_video_recorder:main",
             "recording_manager = session_recorder.recording_manager:main",
             "video_to_image_publisher = session_recorder.video_to_image_publisher:main",
+            "topic_throttle = session_recorder.topic_throttle:main",
+            "session_check = session_recorder.session_check:main",
+            "topic_health_monitor = session_recorder.topic_health_monitor:main",
         ],
     },
 )

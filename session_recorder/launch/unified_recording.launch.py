@@ -81,6 +81,23 @@ def launch_setup(context, *args, **kwargs):
                     "topic_fps_overrides": non_empty(setup["topic_fps_overrides"]),
                     "bag_topics": non_empty(setup["bag_topics"]),
                     "bag_regex": setup.get("bag_regex", ""),
+                    "bag_exclude_regex": setup.get("bag_exclude_regex", ""),
+                    "bag_throttles": non_empty(setup.get("bag_throttles", [])),
+                    "expected_topics": non_empty(setup.get("expected_topics", [])),
+                    "expected_regex": non_empty(setup.get("expected_regex", [])),
+                    "calib_source_dirs": non_empty(
+                        setup.get("calib_source_dirs", [])
+                    ),
+                    "session_check_enabled": bool(
+                        (recording_settings.get("session_check", {}) or {}).get(
+                            "enabled", True
+                        )
+                    ),
+                    "session_check_min_rate_factor": float(
+                        (recording_settings.get("session_check", {}) or {}).get(
+                            "min_rate_factor", 0.5
+                        )
+                    ),
                     "video_encoder": recording_settings.get(
                         "video_encoder", "hevc_nvenc"
                     ),

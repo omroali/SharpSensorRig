@@ -17,6 +17,11 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <!-- Health-monitor web UI. No rosdep keys exist for these; install with
+       pip in the container: pip install fastapi uvicorn -->
+  <exec_depend>python3-fastapi</exec_depend>
+  <exec_depend>python3-uvicorn</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
