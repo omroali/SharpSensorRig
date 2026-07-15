@@ -18,10 +18,25 @@
 # To detect the camera's serial number, re-detect serials with:
 #   lsusb -v -d 045e:02c4 2>/dev/null | grep iSerial
 #
-# Axis conventions used by vicon_marker_calibration_tf.py:
+# Vicon calibration conventions used by vicon_marker_calibration_tf.py:
+#
+# Preferred mode — per-camera `calibration.markers:` block giving each Vicon
+# marker's measured local position. Pose is solved by SVD rigid registration
+# (any non-collinear layout of 3+ markers; coplanarity not required).
+# All positions under `calibration:` (markers, link_offset, extra_frames)
+# share one per-camera BODY frame:
+#   origin = back-left-top corner of the Kinect body, as seen from BEHIND
+#            the camera (standing where the camera points away from you)
+#   X = forward (optical axis direction), Y = left, Z = up
+# `link_offset` places the camera link origin in the body frame;
+# `extra_frames` publishes extra sensor frames as static TF children of the
+# camera frame (e.g. the RealSense mounted above the Kinect).
+#
+# Legacy mode (no `markers:` block) — fixed Top1..Top4 square layout:
 #   forward = Top1 -> Top2
 #   camera-left = Top4 -> Top3
 #   up = forward x camera-left
+#   marker_to_link_offset shifts from the marker centroid to the link origin.
 
 world_frame: map
 
@@ -40,11 +55,40 @@ cameras:
       pitch: -0.10526059889219368
       yaw: -0.17619952136934408
     calibration:
-      vicon_object: KinectV2_1
-      marker_to_link_offset:
-        x: 0.0
-        y: 0.0
-        z: -0.03925
+      vicon_object: Sensors_A
+      # Body frame: origin at back-left-top corner of the Kinect (seen from
+      # behind), X forward, Y left, Z up. Values below are empirically
+      # validated against live Vicon data: fitting them gives a body Z (up)
+      # axis ~98% aligned with true world-up. The alternate X/Y assignment
+      # looks equally plausible by RMS alone (any 3 markers are coplanar, so
+      # its mirror image fits just as well) but its up axis is only ~27%
+      # aligned with true up -- that mirrored assignment is what caused an
+      # earlier "camera renders upside down / into the ground" bug.
+      markers:
+        Top1: {x: 0.001597, y: -0.037317, z: 0.0065}
+        Top2: {x: 0.197810, y: -0.056478, z: 0.0065}
+        Top3: {x: 0.032263, y: -0.001618, z: 0.069732}  # elevated: on RealSense housing
+      # Kinect camera link origin in the body frame.
+      # Placeholder: body centre, 33 mm below top shell -- MEASURE AND REFINE.
+      link_offset: {x: 0.033, y: -0.1245, z: -0.033}
+      # Fixed boresight correction (degrees, body frame). yaw_deg: -90 is
+      # required here: live-tilt testing (2026-07-14) showed physically
+      # pointing the camera up/down changed the *roll* component (and left
+      # the up axis mostly fixed) instead of pitch -- meaning the marker
+      # frame's X (forward) and Y (left) axes were rotated 90 degrees from
+      # the camera's true forward/left. yaw_deg=-90 re-labels them correctly
+      # (this only rotates about the already-validated up axis, so it does
+      # not affect the up-axis validation done earlier).
+      # If pitch still moves the wrong way after this, flip to yaw_deg: 90.
+      # roll_deg/pitch_deg remain available afterwards for any small residual
+      # mounting-tolerance tilt; tune by watching RViz against a known-flat
+      # floor/wall.
+      orientation_offset: {roll_deg: 0.0, pitch_deg: 0.0, yaw_deg: -90.0}
+      # RealSense floats 52 mm above the Kinect top shell; z = 0.052 gap
+      # + 0.0145 (half of D455 29 mm height) to the housing centre.
+      # Adjust x/y (and z) to the actual RealSense optical origin.
+      extra_frames:
+        realsense_d55_1_link: {x: 0.033, y: -0.1245, z: 0.0665}
     # point_cloud_filter:
     #   min_distance: 0.0
     #   max_distance: 2.0
@@ -86,11 +130,16 @@ cameras:
       pitch: -0.09112338017412161
       yaw: -1.9911738653058177
     calibration:
-      vicon_object: KinectV2_3
-      marker_to_link_offset:
-        x: 0.0
-        y: 0.0
-        z: -0.03925
+      vicon_object: Sensors_B
+      # Same physical marker/sensor layout as kinect2_1 (see comments there).
+      markers:
+        Top1: {x: 0.001597, y: -0.037317, z: 0.0065}
+        Top2: {x: 0.197810, y: -0.056478, z: 0.0065}
+        Top3: {x: 0.032263, y: -0.001618, z: 0.069732}
+      link_offset: {x: 0.033, y: -0.1245, z: -0.033}
+      orientation_offset: {roll_deg: 0.0, pitch_deg: 0.0, yaw_deg: -90.0}
+      extra_frames:
+        realsense_d55_2_link: {x: 0.033, y: -0.1245, z: 0.0665}
     point_cloud_filter:
       min_distance: 0.0
       max_distance: 2.0

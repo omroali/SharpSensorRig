@@ -80,7 +80,7 @@ recording_settings:
     streams:
       color:
         enabled: true
-        resolution: "qhd"
+        resolution: "hd"
         rectified: true
         mode: "raw"
         fps: 30
