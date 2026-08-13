@@ -19,7 +19,7 @@ tmux has-session -t "$SESSION" 2>/dev/null && {
 # Kinect
 tmux new-session -d -s "$SESSION" -n "kinect" bash -i
 sleep 2  # let .bashrc finish before typing
-tmux send-keys -t "$SESSION:kinect" "ros2 launch kinect2_bridge multi_kinect.launch.py launch_rviz:=false" Enter
+tmux send-keys -t "$SESSION:kinect" "ros2 launch kinect2_bridge multi_kinect.launch.py launch_rviz:=false launch_delay_sec:=0 launch_point_clouds:=false" Enter
 
 # RealSense (cameras + TF, driven by realsense_config.yaml)
 launch_window "realsense" "ros2 launch realsense_tf_broadcaster realsense_multi_camera.launch.py"
@@ -38,6 +38,12 @@ launch_window "rviz" "rviz2 -d \$(ros2 pkg prefix kinect2_bridge)/share/kinect2_
 
 # Unified recording manager (service-driven — use 'start'/'stop' aliases to control)
 launch_window "record" "ros2 launch session_recorder unified_recording.launch.py"
+
+# Horizontal split below the recording manager with usage instructions.
+tmux split-window -v -t "$SESSION:record" bash -i
+# sleep 2  # let .bashrc finish before typing
+# tmux send-keys -t "$SESSION:record" "echo \"to begin recording, type 'start' to end recording, type 'stop'\"" Enter
+
 
 launch_window "health" "ros2 run session_recorder topic_health_monitor"
 

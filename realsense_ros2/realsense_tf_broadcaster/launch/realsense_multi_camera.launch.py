@@ -92,6 +92,8 @@ def _launch_setup(context, *args, **kwargs):
                         "align_depth.enable": False,
                         "pointcloud.enable": False,
                         "initial_reset": False,
+                        "rgb_camera.color_profile": "640x480x15",
+                        "depth_module.depth_profile": "640x360x15",
                     }
                 ],
             )

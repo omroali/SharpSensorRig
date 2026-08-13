@@ -8,7 +8,7 @@
 
 recording_settings:
   output_root: "/home/ubuntu/data"
-  uuid: "0000"
+  uuid: "3b4cd179-90f8-4ef1-9a30-aec39b0371f0"
 
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),
@@ -80,20 +80,20 @@ recording_settings:
     streams:
       color:
         enabled: true
-        resolution: "hd"
+        resolution: "qhd"
         rectified: true
-        mode: "raw"
+        mode: "compressed"
         fps: 30
       depth:
         enabled: true
         resolution: "sd"
         rectified: false
-        mode: "compressed"
+        mode: "raw"
         fps: 30
       ir:
         enabled: true
         rectified: false
-        mode: "compressed"
+        mode: "raw"
         fps: 5
 
   # ───────────────────────── RealSense per-stream settings ─────────────────
@@ -118,14 +118,14 @@ recording_settings:
     infrared_1:
       enabled: false
       mode: "raw"
-      fps: 15
+      fps: 5
     infrared_2:
       enabled: false
       mode: "raw"
-      fps: 15
+      fps: 5
     depth:
       enabled: true
-      mode: "compressed"
+      mode: "raw"
       fps: 15
 
   # ───────────────────────── Vicon ────────────────────────────────────────

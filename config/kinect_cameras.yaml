@@ -41,8 +41,38 @@
 world_frame: map
 
 cameras:
-  kinect2_1:
+  kinect2_3:
     serial: "001934470647"
+    # serial: "006686263647"
+    # serial: "001926370647"
+    enabled: true
+    record: true
+    frame: kinect2_3_link
+    position:
+      x: 1.7250229003607818
+      y: 0.38321394828841027
+      z: 0.9689872099394938
+    orientation:
+      roll: 0.01363704819092533
+      pitch: -0.09112338017412161
+      yaw: -1.9911738653058177
+    calibration:
+      vicon_object: Sensors_B
+      # Same physical marker/sensor layout as kinect2_1 (see comments there).
+      markers:
+        Top1: {x: 0.001597, y: -0.037317, z: 0.0065}
+        Top2: {x: 0.197810, y: -0.056478, z: 0.0065}
+        Top3: {x: 0.032263, y: -0.001618, z: 0.069732}
+      link_offset: {x: 0.033, y: -0.1245, z: -0.033}
+      orientation_offset: {roll_deg: 0.0, pitch_deg: 0.0, yaw_deg: -90.0}
+      extra_frames:
+        realsense_d55_2_link: {x: 0.033, y: -0.1245, z: 0.0665}
+    # point_cloud_filter:
+    #   min_distance: 0.0
+    #   max_distance: 2.0
+  kinect2_1:
+    serial: "006686263647"
+    # serial: "001934470647"
     enabled: true
     record: true
     frame: kinect2_1_link
@@ -93,56 +123,7 @@ cameras:
     #   min_distance: 0.0
     #   max_distance: 2.0
 
-  # kinect2_2:
-  #   serial: "007425354147"
-  #   enabled: true
-  #   record: true
-  #   frame: kinect2_2_link
-  #   position:
-  #     x: 1.7250229003607818
-  #     y: 0.38321394828841027
-  #     z: 0.9689872099394938
-  #   orientation:
-  #     roll: 0.01363704819092533
-  #     pitch: -0.09112338017412161
-  #     yaw: -1.9911738653058177
-  #   calibration:
-  #     vicon_object: KinectV2_2
-  #     marker_to_link_offset:
-  #       x: 0.0
-  #       y: 0.0
-  #       z: -0.03925
-  # point_cloud_filter:
-  #   min_distance: 0.0
-  #   max_distance: 2.0
 
-  kinect2_3:
-    serial: "001926370647"
-    enabled: true
-    record: true
-    frame: kinect2_3_link
-    position:
-      x: 1.7250229003607818
-      y: 0.38321394828841027
-      z: 0.9689872099394938
-    orientation:
-      roll: 0.01363704819092533
-      pitch: -0.09112338017412161
-      yaw: -1.9911738653058177
-    calibration:
-      vicon_object: Sensors_B
-      # Same physical marker/sensor layout as kinect2_1 (see comments there).
-      markers:
-        Top1: {x: 0.001597, y: -0.037317, z: 0.0065}
-        Top2: {x: 0.197810, y: -0.056478, z: 0.0065}
-        Top3: {x: 0.032263, y: -0.001618, z: 0.069732}
-      link_offset: {x: 0.033, y: -0.1245, z: -0.033}
-      orientation_offset: {roll_deg: 0.0, pitch_deg: 0.0, yaw_deg: -90.0}
-      extra_frames:
-        realsense_d55_2_link: {x: 0.033, y: -0.1245, z: 0.0665}
-    point_cloud_filter:
-      min_distance: 0.0
-      max_distance: 2.0
 # #
 # Vicon auto-calibration fields (optional per camera):
 #   calibration:

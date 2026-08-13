@@ -1,0 +1,11 @@
+.git
+.gitmodules
+.vscode
+.claude
+data
+**/__pycache__
+**/*.pyc
+**/*.log
+**/build
+**/install
+**/log

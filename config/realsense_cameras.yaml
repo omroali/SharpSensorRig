@@ -27,8 +27,8 @@ cameras:
       yaw: -0.17619952136934408
 
   realsense_d55_2:
-    serial: "419222301842"
-    model: "D555"
+    serial: "248622301929"
+    model: "D455"
     driver: usb
     ip: "192.168.12.55"
     enabled: true
@@ -50,3 +50,28 @@ cameras:
       roll: 0.01363704819092533
       pitch: -0.09112338017412161
       yaw: -1.9911738653058177
+
+  # realsense_d55_2:
+  #   serial: "419222301842"
+  #   model: "D555"
+  #   driver: usb
+  #   ip: "192.168.12.55"
+  #   enabled: true
+  #   record: true
+  #   namespace: realsense_d55_2
+  #   camera_name: color
+  #   frame: realsense_d55_2_link
+  #   source_color_topic: /realsense/D555_419222301842_Color
+  #   source_color_info_topic: /realsense/D555_419222301842_Color/camera_info
+  #   output_image_topic: /realsense/D555_419222301842_Color/image
+  #   output_info_topic: /realsense/D555_419222301842_Color/camera_info
+  #   optical_frame: realsense_d55_2_color_optical_frame
+  #   extra_optical_frames: []
+  #   position:
+  #     x: 1.7250229003607818
+  #     y: 0.38321394828841027
+  #     z: 0.9689872099394938
+  #   orientation:
+  #     roll: 0.01363704819092533
+  #     pitch: -0.09112338017412161
+  #     yaw: -1.9911738653058177

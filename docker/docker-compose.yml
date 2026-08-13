@@ -1,16 +1,28 @@
 services:
   sharp-sensor-rig:
     build:
-      context: .
-      dockerfile: Dockerfile
+      # Context is the repo root so the ROS 2 package sources can be
+      # COPYed into the image and colcon-built at build time.
+      context: ..
+      dockerfile: docker/Dockerfile
       network: host
+      # Expose the host-installed RealSense SDK (mounted read-only at
+      # runtime under /usr/local) to the build so the realsense-ros
+      # clone can be compiled during the image build stage.
+      additional_contexts:
+        rs_sdk: /usr/local
     image: sharp-sensor-rig # resulting image name
 
     stdin_open: true
     tty: true
     command: /bin/bash # default shell when you attach
     network_mode: host # helps ROS 2 discovery (optional)
-    mem_limit: 16g
+    mem_limit: 24g
+    # Fast DDS SHM transport needs real /dev/shm headroom for large
+    # messages (point clouds, HD colour frames); Docker's default 64M
+    # forces a fallback to fragmented UDP loopback, which was burning
+    # ~80% kernel time in the Kinect bridge processes.
+    ipc: host
 
     privileged: true
     gpus: all

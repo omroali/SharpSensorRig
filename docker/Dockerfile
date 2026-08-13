@@ -49,7 +49,7 @@ RUN apt-get update && \
     nvidia-cuda-toolkit && \
     rm -rf /var/lib/apt/lists/*
 
-COPY helper_math.h /usr/local/include/helper_math.h
+COPY docker/helper_math.h /usr/local/include/helper_math.h
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -115,6 +115,26 @@ RUN git clone https://github.com/realsenseai/realsense-ros.git \
     -b 4.57.7 --depth 1 ${BASE_WS}/src/realsense-ros \
     && chown -R ${USERNAME}:${USERNAME} ${BASE_WS}/src/realsense-ros
 
+# Bring the host-installed RealSense SDK into the image so realsense-ros
+# can be compiled at build time. Copy the whole lib/include/share trees so
+# the SDK's cmake targets (rsutils, realdds, fastrtps, fastcdr,
+# foonathan_memory, ...) resolve. At runtime these paths are shadowed by
+# the read-only /usr/local bind mounts from the host (same 2.57.7 SDK).
+COPY --from=rs_sdk lib /usr/local/lib
+COPY --from=rs_sdk include /usr/local/include
+COPY --from=rs_sdk share /usr/local/share
+RUN ldconfig
+
+# Copy the workspace package sources so they can be built into the image.
+# At runtime these are overlaid by the read-write bind mounts in
+# docker-compose.yml; with --symlink-install live Python edits take effect
+# immediately, and C++ changes only need an incremental `wbuild`.
+COPY --chown=${USERNAME}:${USERNAME} kinect2_ros2   ${BASE_WS}/src/kinect2_ros2
+COPY --chown=${USERNAME}:${USERNAME} realsense_ros2 ${BASE_WS}/src/realsense_ros2
+COPY --chown=${USERNAME}:${USERNAME} vicon_ros      ${BASE_WS}/src/vicon_ros
+COPY --chown=${USERNAME}:${USERNAME} velodyne_ros   ${BASE_WS}/src/velodyne_ros
+COPY --chown=${USERNAME}:${USERNAME} session_recorder ${BASE_WS}/src/session_recorder
+
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
     tmule==1.5.9 \
     pyserial
@@ -131,5 +151,19 @@ RUN sed -i 's/^#\(force_color_prompt\)/\1/' /home/${USERNAME}/.bashrc
 RUN echo '[ -f $HOME/bash_scripts/bashrc_extensions.sh ] && \
     source $HOME/bash_scripts/bashrc_extensions.sh' \
     >> /home/${USERNAME}/.bashrc
+
+# Pre-build the workspace at image-build time so that starting a container
+# (docker compose run --rm ...) no longer triggers a full colcon build.
+# The compiler/env mirror the runtime values in docker-compose.yml so the
+# baked build behaves identically to the previous on-start build.
+# Source changes that need a rebuild can still be applied with `wbuild`.
+RUN /bin/bash -c "source /opt/ros/jazzy/setup.bash \
+    && cd ${BASE_WS} \
+    && CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 \
+       CFLAGS=-fno-tree-fre CXXFLAGS=-fno-tree-fre MAKEFLAGS=-j1 \
+       colcon build --symlink-install \
+       --cmake-args -DCMAKE_BUILD_TYPE=Release \
+       -Drealsense2_DIR=/usr/local/lib/cmake/realsense2 \
+    && rm -f install/COLCON_IGNORE"
 
 CMD ["bin/bash"]
