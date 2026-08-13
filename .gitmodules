@@ -1,6 +1,6 @@
 [submodule "kinect2_ros2"]
 	path = kinect2_ros2
-	url = https://github.com/omroali/kinect2_ros2
+	url = git@github.com:omroali/kinect2_ros2.git
 [submodule "vicon_ros"]
 	path = vicon_ros
 	url = git@github.com:omroali/ros2-vicon-receiver.git
