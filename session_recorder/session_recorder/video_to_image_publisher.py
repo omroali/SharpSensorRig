@@ -10,7 +10,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
@@ -156,13 +156,22 @@ class VideoToImagePublisher(Node):
     def __init__(self):
         super().__init__("video_to_image_publisher")
 
-        self.declare_parameter("videos", Parameter.Type.STRING_ARRAY)
-        self.declare_parameter("timestamp_csvs", Parameter.Type.STRING_ARRAY)
-        self.declare_parameter("topics", Parameter.Type.STRING_ARRAY)
-        self.declare_parameter("frame_ids", Parameter.Type.STRING_ARRAY)
+        # A type-only declaration (``Parameter.Type.STRING_ARRAY``) leaves the
+        # parameter uninitialized in Jazzy, and reading an uninitialized
+        # parameter raises ParameterUninitializedException. Give each array a
+        # concrete default; empty entries are filtered out below.
+        self.declare_parameter("videos", [""])
+        self.declare_parameter("timestamp_csvs", [""])
+        self.declare_parameter("topics", [""])
+        self.declare_parameter("frame_ids", [""])
         self.declare_parameter("queue_size", 10)
         self.declare_parameter("encoding", "bgr8")
-        self.declare_parameter("use_sim_time", True)
+        # `use_sim_time` is a built-in parameter that rclpy declares on every
+        # node (Jazzy and later), so declaring it unconditionally raises
+        # ParameterAlreadyDeclaredException. Only declare it if absent, which
+        # keeps this working on older distros too.
+        if not self.has_parameter("use_sim_time"):
+            self.declare_parameter("use_sim_time", True)
 
         videos = [str(v) for v in self.get_parameter("videos").value if v]
         csvs = [str(v) for v in self.get_parameter("timestamp_csvs").value if v]
@@ -185,7 +194,13 @@ class VideoToImagePublisher(Node):
             for video, csv_path, topic, frame_id in zip(videos, csvs, topics, frame_ids)
         ]
 
-        self._clock_sub = self.create_subscription(Clock, "/clock", self._on_clock, 10)
+        # `/clock` is conventionally published BEST_EFFORT (rosbag2_player
+        # --clock, rclcpp's ClockQoS). A default RELIABLE subscription is
+        # incompatible with that and silently receives nothing, which stalls
+        # the whole node because publishing is clock-driven. BEST_EFFORT also
+        # matches a RELIABLE publisher, so this works either way.
+        clock_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self._clock_sub = self.create_subscription(Clock, "/clock", self._on_clock, clock_qos)
         self._latest_clock = 0
 
     def _on_clock(self, msg: Clock):
