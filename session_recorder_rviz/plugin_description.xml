@@ -1,0 +1,11 @@
+<library path="session_recorder_rviz">
+  <class
+    name="session_recorder_rviz/SessionStatusPanel"
+    type="session_recorder_rviz::SessionStatusPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Shows the SHARP session player's play/pause state, position and current
+      activity (from /session/status_text). Dock it wherever you like.
+    </description>
+  </class>
+</library>

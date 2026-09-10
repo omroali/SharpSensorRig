@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>session_recorder_rviz</name>
+  <version>0.1.0</version>
+  <description>
+    RViz panel showing the SHARP session player's play/pause state and current
+    activity, driven by /session/status_text.
+  </description>
+  <maintainer email="oali@example.com">oali</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rviz_common</depend>
+  <depend>std_msgs</depend>
+  <build_depend>pluginlib</build_depend>
+  <build_depend>qtbase5-dev</build_depend>
+  <exec_depend>pluginlib</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
