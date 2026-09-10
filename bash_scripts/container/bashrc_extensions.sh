@@ -81,6 +81,16 @@ alias launch_velodyne="ros2 launch velodyne velodyne_with_tf.launch.py"
 alias start="ros2 service call /start_recording std_srvs/srv/Trigger"
 alias stop="ros2 service call /stop_recording std_srvs/srv/Trigger"
 
+# Replay a recorded session (bag + videos + point clouds + RViz):
+#   replay <session_dir>   e.g. replay ~/data/<uuid>/session_20260909_123226
+alias replay="ros2 run session_recorder replay_session"
+
+# Label frames with activities from /sharp/events, then scrub/jump in RViz:
+#   label_session <session_dir>   # writes activities.yaml + labels/
+#   scrub <session_dir>           # scrub + jump between activities
+alias label_session="ros2 run session_recorder session_activities"
+alias scrub="ros2 run session_recorder session_player"
+
 alias launch_all="bash $HOME/bash_scripts/tmux_launch.sh"
 alias terminate_all="bash $HOME/bash_scripts/tmux_terminate.sh"
 

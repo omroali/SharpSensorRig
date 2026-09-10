@@ -31,6 +31,9 @@ setup(
             "topic_throttle = session_recorder.topic_throttle:main",
             "session_check = session_recorder.session_check:main",
             "topic_health_monitor = session_recorder.topic_health_monitor:main",
+            "replay_session = session_recorder.replay_session:main",
+            "session_activities = session_recorder.activities:main",
+            "session_player = session_recorder.session_player:main",
         ],
     },
 )
