@@ -8,7 +8,7 @@
 
 recording_settings:
   output_root: "/home/ubuntu/data"
-  uuid: "3b4cd179-90f8-4ef1-9a30-aec39b0371f0"
+  uuid: "daniel-trial-capture"
 
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),
