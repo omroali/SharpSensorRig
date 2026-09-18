@@ -34,6 +34,7 @@ setup(
             "replay_session = session_recorder.replay_session:main",
             "session_activities = session_recorder.activities:main",
             "session_player = session_recorder.session_player:main",
+            "tf_static_replay = session_recorder.tf_static_replay:main",
         ],
     },
 )

@@ -91,6 +91,12 @@ alias replay="ros2 run session_recorder replay_session"
 alias label_session="ros2 run session_recorder session_activities"
 alias scrub="ros2 run session_recorder session_player"
 
+# Both replay tools move recorded frames if the session carries a
+# <session>/tf_overrides.yaml (or if given --tf-override CHILD=[PARENT:]X,Y,Z).
+# Use it when a frame was published at the wrong pose during recording --
+# the bad transform is baked into the bag and a config edit cannot undo it.
+#   e.g. realsense_d55_1_link=-3.4535,-0.4038,1.0216
+
 alias launch_all="bash $HOME/bash_scripts/tmux_launch.sh"
 alias terminate_all="bash $HOME/bash_scripts/tmux_terminate.sh"
 
