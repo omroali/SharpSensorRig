@@ -136,6 +136,43 @@ def test_bag_play_cmd_flags():
     assert "--rate" in replay.bag_play_cmd("/b", 0.5, False)
 
 
+def test_bag_play_cmd_excludes_tf_static_when_overriding():
+    plain = replay.bag_play_cmd("/b", 1.0, False)
+    assert "/tf_static" not in plain
+
+    with_override = replay.bag_play_cmd("/b", 1.0, False, exclude_tf_static=True)
+    assert with_override[with_override.index("--exclude-topics") + 1] == "/tf_static"
+
+
+def test_tf_static_replay_cmd_forwards_specs():
+    cmd = replay.tf_static_replay_cmd("/s", [])
+    assert cmd[1:] == ["-m", "session_recorder.tf_static_replay", "/s"]
+    assert replay.tf_static_replay_cmd("/s", ["cam=1,2,3"])[-2:] == [
+        "--tf-override", "cam=1,2,3"
+    ]
+
+
+def test_camera_info_for_strips_compressed_suffix():
+    assert replay.camera_info_for("/realsense/D555_1/color/image_raw/compressed") == \
+        "/realsense/D555_1/color/camera_info"
+    assert replay.camera_info_for("/kinect2_1/qhd/image_color_rect") == \
+        "/kinect2_1/qhd/camera_info"
+    assert replay.camera_info_for("") == ""
+
+
+def test_video_publisher_cmd_passes_known_camera_info_topics():
+    specs = [
+        {"video": "/v/a.mp4", "csv": "/v/a.csv", "publish_topic": "/cam/color/image_raw",
+         "record_topic": "/cam/color/image_raw/compressed"},
+        {"video": "/v/b.mp4", "csv": "/v/b.csv", "publish_topic": "/b", "record_topic": ""},
+    ]
+    topics = {"/cam/color/camera_info": "sensor_msgs/msg/CameraInfo"}
+
+    cmd = replay.video_publisher_cmd(specs, topics)
+    frames = next(a.split(":=", 1)[1] for a in cmd if a.startswith("frame_id_topics:="))
+    assert frames == "[/cam/color/camera_info, ]"
+
+
 def test_video_publisher_cmd_arrays():
     specs = [
         {"video": "/v/a.mp4", "csv": "/v/a.csv", "publish_topic": "/a"},
