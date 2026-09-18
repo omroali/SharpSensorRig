@@ -76,6 +76,8 @@ services:
 
       # Data recording mount
       - /media/oali/RECORDING_DATA:/home/ubuntu/data:rw
+      - /data/daniel_trial:/home/ubuntu/data:rw
+
 
       # Tmux config
       - ./tmux.conf:/home/ubuntu/.tmux.conf:ro
