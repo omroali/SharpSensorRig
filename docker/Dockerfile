@@ -123,7 +123,18 @@ RUN git clone https://github.com/realsenseai/realsense-ros.git \
 COPY --from=rs_sdk lib /usr/local/lib
 COPY --from=rs_sdk include /usr/local/include
 COPY --from=rs_sdk share /usr/local/share
-RUN ldconfig
+
+# rs_sdk is the host's /usr/local, which may also carry its own libfreenect2
+# (OpenGL-enabled, e.g. from a source install). That copy shadows the image's
+# own libfreenect2, built above with -DENABLE_OPENGL=OFF into /usr: the compiler
+# picks the host's config.h in /usr/local/include (OpenGL on) and emits an
+# OpenGLPacketPipeline reference, while the linker resolves -lfreenect2 to
+# /usr/lib (OpenGL off) -> undefined reference. Drop the host's stray copy so
+# headers and library both come from the image's own install. No-op on hosts
+# whose /usr/local has no libfreenect2.
+# Keep /usr/local/lib/cmake/freenect2/ - it is what satisfies find_package(freenect2).
+RUN rm -rf /usr/local/include/libfreenect2 /usr/local/lib/libfreenect2.so* \
+ && ldconfig
 
 # Copy the workspace package sources so they can be built into the image.
 # At runtime these are overlaid by the read-write bind mounts in
