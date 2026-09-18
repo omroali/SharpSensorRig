@@ -13,6 +13,8 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
 
+from session_recorder.video_encoding import build_encoder_args, keyframe_interval
+
 
 def topic_to_filename(topic: str) -> str:
     return topic.strip("/").replace("/", "_")
@@ -151,23 +153,7 @@ class StreamRecorder:
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
 
-        if self._encoder in {"hevc_nvenc", "h264_nvenc"}:
-            quality_flags = ["-cq", str(self._crf)]
-        elif self._encoder == "hevc_qsv":
-            quality_flags = ["-global_quality", str(self._crf)]
-        elif self._encoder == "hevc_amf":
-            quality_flags = ["-qp_i", str(self._crf), "-qp_p", str(self._crf)]
-        else:
-            quality_flags = ["-crf", str(self._crf)]
-
-        output_fmt = (
-            "nv12" if self._encoder in {"hevc_nvenc", "h264_nvenc"} else "yuv420p"
-        )
-
-        encoder_args = ["-vcodec", self._encoder, "-vf", f"format={output_fmt}"]
-        if self._encoder in {"hevc_nvenc", "h264_nvenc"}:
-            encoder_args += ["-preset", "p1", "-tune", "ll"]
-        encoder_args += quality_flags
+        encoder_args = build_encoder_args(self._encoder, self._crf, mux_fps)
 
         cmd = [
             "ffmpeg",
@@ -194,7 +180,7 @@ class StreamRecorder:
             f"[{self.topic}] Starting ffmpeg -> {self._video_path}\n"
             f"  encoder={self._encoder} crf={self._crf} "
             f"{width}x{height} @ {mux_fps}fps (configured {self._fps}fps) "
-            f"pixel_fmt={pixel_fmt}"
+            f"gop={keyframe_interval(mux_fps)} pixel_fmt={pixel_fmt}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
@@ -370,23 +356,7 @@ class CompressedStreamRecorder:
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
 
-        if self._encoder in {"hevc_nvenc", "h264_nvenc"}:
-            quality_flags = ["-cq", str(self._crf)]
-        elif self._encoder == "hevc_qsv":
-            quality_flags = ["-global_quality", str(self._crf)]
-        elif self._encoder == "hevc_amf":
-            quality_flags = ["-qp_i", str(self._crf), "-qp_p", str(self._crf)]
-        else:
-            quality_flags = ["-crf", str(self._crf)]
-
-        output_fmt = (
-            "nv12" if self._encoder in {"hevc_nvenc", "h264_nvenc"} else "yuv420p"
-        )
-
-        encoder_args = ["-vcodec", self._encoder, "-vf", f"format={output_fmt}"]
-        if self._encoder in {"hevc_nvenc", "h264_nvenc"}:
-            encoder_args += ["-preset", "p1", "-tune", "ll"]
-        encoder_args += quality_flags
+        encoder_args = build_encoder_args(self._encoder, self._crf, mux_fps)
 
         cmd = [
             "ffmpeg",
@@ -408,7 +378,8 @@ class CompressedStreamRecorder:
         self.logger.info(
             f"[{self.topic}] Starting ffmpeg (compressed) -> {self._video_path}\n"
             f"  encoder={self._encoder} crf={self._crf} @ {mux_fps}fps "
-            f"(configured {self._fps}fps) input_format={fmt_hint}"
+            f"(configured {self._fps}fps) gop={keyframe_interval(mux_fps)} "
+            f"input_format={fmt_hint}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
