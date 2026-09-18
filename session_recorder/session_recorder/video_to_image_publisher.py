@@ -164,6 +164,11 @@ class VideoToImagePublisher(Node):
         self.declare_parameter("timestamp_csvs", [""])
         self.declare_parameter("topics", [""])
         self.declare_parameter("frame_ids", [""])
+        # Optional per-stream camera_info topic: when given, the stream adopts
+        # that camera_info's frame_id once it arrives (the recorded bag publishes
+        # it). Without this the image carries an empty frame_id, and RViz draws
+        # it at the fixed frame instead of at the camera.
+        self.declare_parameter("frame_id_topics", [""])
         self.declare_parameter("queue_size", 10)
         self.declare_parameter("encoding", "bgr8")
         # `use_sim_time` is a built-in parameter that rclpy declares on every
@@ -177,6 +182,7 @@ class VideoToImagePublisher(Node):
         csvs = [str(v) for v in self.get_parameter("timestamp_csvs").value if v]
         topics = [str(v) for v in self.get_parameter("topics").value if v]
         frame_ids = [str(v) for v in self.get_parameter("frame_ids").value if v]
+        frame_id_topics = [str(v) for v in self.get_parameter("frame_id_topics").value if v]
         queue_size = int(self.get_parameter("queue_size").value)
         encoding = str(self.get_parameter("encoding").value)
 
@@ -189,10 +195,32 @@ class VideoToImagePublisher(Node):
         if not frame_ids:
             frame_ids = [""] * len(videos)
 
+        if frame_id_topics and len(frame_id_topics) != len(videos):
+            raise RuntimeError("frame_id_topics length must match videos length")
+
+        if not frame_id_topics:
+            frame_id_topics = [""] * len(videos)
+
         self._streams = [
             VideoStream(video, csv_path, topic, encoding, queue_size, frame_id, self)
             for video, csv_path, topic, frame_id in zip(videos, csvs, topics, frame_ids)
         ]
+
+        # BEST_EFFORT on the subscription so it matches the sensor-data QoS the
+        # bag/driver uses for camera_info (a RELIABLE subscriber here would be
+        # incompatible and silently receive nothing).
+        info_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        for stream, info_topic in zip(self._streams, frame_id_topics):
+            if not info_topic or stream.frame_id:
+                continue
+            self.create_subscription(
+                CameraInfo, info_topic,
+                lambda msg, s=stream, t=info_topic: self._adopt_frame_id(s, t, msg),
+                info_qos,
+            )
+            self.get_logger().info(
+                f"[{stream.topic}] will adopt its frame_id from {info_topic}"
+            )
 
         # `/clock` is conventionally published BEST_EFFORT (rosbag2_player
         # --clock, rclcpp's ClockQoS). A default RELIABLE subscription is
@@ -202,6 +230,20 @@ class VideoToImagePublisher(Node):
         clock_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self._clock_sub = self.create_subscription(Clock, "/clock", self._on_clock, clock_qos)
         self._latest_clock = 0
+
+    def _adopt_frame_id(self, stream: VideoStream, info_topic: str, msg: CameraInfo):
+        """Take the frame_id from the recorded camera_info, once.
+
+        Empty frames are ignored: this node publishes its own default
+        camera_info on the same topic, and adopting that would be circular.
+        """
+        frame_id = str(msg.header.frame_id)
+        if not frame_id or stream.frame_id:
+            return
+        stream.frame_id = frame_id
+        self.get_logger().info(
+            f"[{stream.topic}] frame_id <- {frame_id} (from {info_topic})"
+        )
 
     def _on_clock(self, msg: Clock):
         self._latest_clock = msg.clock.sec * 1_000_000_000 + msg.clock.nanosec

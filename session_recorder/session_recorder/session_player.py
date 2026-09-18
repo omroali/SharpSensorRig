@@ -46,6 +46,7 @@ import yaml
 
 from session_recorder.activities import ActivityIndex
 from session_recorder.replay_session import (
+    camera_info_for,
     discover_depths,
     discover_extra_topics,
     discover_videos,
@@ -54,6 +55,13 @@ from session_recorder.replay_session import (
     load_expected,
     write_rviz_config,
 )
+from session_recorder.tf_overrides import (
+    describe_overrides,
+    load_overrides,
+    merge_overrides,
+    parse_override_spec,
+)
+from session_recorder.tf_static_replay import publish_with_overrides
 
 EVENTS_TOPIC = "/sharp/events"
 GUARD_NS = 1_000_000_000  # seek this far before the target, then read forward
@@ -90,6 +98,23 @@ def progress_fraction(start_ns: int, end_ns: int, ns: int) -> float:
     if end_ns <= start_ns:
         return 0.0
     return min(1.0, max(0.0, (ns - start_ns) / (end_ns - start_ns)))
+
+
+def bag_start_ns(info: dict) -> int | None:
+    """Bag start time in ns, or None when the metadata doesn't state one.
+
+    rosbag2 metadata v9 (Jazzy) stores ``starting_time.nanoseconds_since_epoch``;
+    older bags used ``starting_time.nanoseconds``. Reading only the old key
+    silently yields 0, which puts the session clock ~56 years before every bag,
+    video and event timestamp — scrubbing then looks dead and activities never
+    match.
+    """
+    starting = info.get("starting_time") or {}
+    for key in ("nanoseconds_since_epoch", "nanoseconds"):
+        value = starting.get(key)
+        if value is not None:
+            return int(value)
+    return None
 
 
 def _mmss(ns: int) -> str:
@@ -144,6 +169,10 @@ class SessionPlayer:
         self._display_topics = sorted(
             {d["image"] for d in depths}
             | {d["camera_info"] for d in depths}
+            # Colour camera_info is replayed too, so each video stream can adopt
+            # its recorded frame_id (an empty frame draws the image at the fixed
+            # frame instead of at the camera).
+            | {t for t in (camera_info_for(v.get("record_topic") or "") for v in videos) if t}
             | set(extra_topics or ())
         )
         self._queues: dict[str, deque] = {}
@@ -157,14 +186,23 @@ class SessionPlayer:
         meta_path = os.path.join(bag_dir, "metadata.yaml")
         with open(meta_path, "r", encoding="utf-8") as handle:
             info = (yaml.safe_load(handle) or {}).get("rosbag2_bagfile_information", {}) or {}
-        start = int((info.get("starting_time", {}) or {}).get("nanoseconds", 0))
+        start = bag_start_ns(info)
         duration = int((info.get("duration", {}) or {}).get("nanoseconds", 0))
-        self.start_ns, self.end_ns = start, start + duration
+        # Union the bag range with the video timestamp ranges. An absent start
+        # must not contribute a 0 here, or it drags start_ns back to the Unix
+        # epoch and every seek/activity lookup misses by ~56 years.
+        starts: list[int] = []
+        ends: list[int] = []
+        if start is not None:
+            starts.append(start)
+            ends.append(start + duration)
         for spec in videos:
             stamps = _csv_timestamps(spec["csv"])
             if stamps:
-                self.start_ns = min(self.start_ns, stamps[0])
-                self.end_ns = max(self.end_ns, stamps[-1])
+                starts.append(stamps[0])
+                ends.append(stamps[-1])
+        self.start_ns = min(starts) if starts else 0
+        self.end_ns = max(ends) if ends else 0
 
     def _open_streams(self, videos):
         import cv2
@@ -178,6 +216,9 @@ class SessionPlayer:
                 "cap": cap,
                 "timestamps": stamps,
                 "last_published": -1,
+                # Filled in from the recorded camera_info once it is seen; an
+                # empty frame_id makes RViz draw the image at the fixed frame.
+                "frame_id": "",
             })
 
     def seek(self, ns: int) -> None:
@@ -333,7 +374,7 @@ class SessionPlayer:
             msg = Image()
             msg.header.stamp.sec = stamp // 1_000_000_000
             msg.header.stamp.nanosec = stamp % 1_000_000_000
-            msg.header.frame_id = ""
+            msg.header.frame_id = stream.get("frame_id", "")
             msg.height, msg.width = frame.shape[:2]
             msg.encoding = "bgr8"
             msg.is_bigendian = False
@@ -430,8 +471,12 @@ def _csv_timestamps(path: str) -> list[int]:
 # ── ROS wiring ──────────────────────────────────────────────────────────────
 
 
-def _publish_tf_static(node, bag_dir, info, types, transient_qos):
-    """Publish every ``/tf_static`` message from the bag once, latched."""
+def _publish_tf_static(node, bag_dir, info, types, transient_qos, overrides=None):
+    """Publish every ``/tf_static`` message from the bag once, latched.
+
+    Overridden child frames are dropped from the recorded messages and replaced
+    with the override, so each frame keeps exactly one parent.
+    """
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -454,7 +499,7 @@ def _publish_tf_static(node, bag_dir, info, types, transient_qos):
     except Exception:
         pass
 
-    sent = 0
+    messages = []
     while reader.has_next():
         name, data, _stamp = reader.read_next()
         if name != topic:
@@ -463,12 +508,23 @@ def _publish_tf_static(node, bag_dir, info, types, transient_qos):
         for transform in getattr(msg, "transforms", []):
             transform.header.stamp.sec = 0
             transform.header.stamp.nanosec = 0
+        messages.append(msg)
+
+    if overrides:
+        applied = publish_with_overrides(pub, messages, overrides)
+        node.get_logger().info(
+            f"Published {len(messages)} /tf_static message(s) with overrides:\n"
+            f"{describe_overrides(applied)}"
+        )
+        return
+
+    for msg in messages:
         pub.publish(msg)
-        sent += 1
-    node.get_logger().info(f"Published {sent} /tf_static message(s)")
+    node.get_logger().info(f"Published {len(messages)} /tf_static message(s)")
 
 
-def _build_node(session_dir, bag_dir, videos, depths, rate, extra_topics=None):
+def _build_node(session_dir, bag_dir, videos, depths, rate, extra_topics=None,
+                tf_overrides=None):
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from rosidl_runtime_py.utilities import get_message
@@ -529,7 +585,7 @@ def _build_node(session_dir, bag_dir, videos, depths, rate, extra_topics=None):
     # /tf_static is latched and lives at the very start of the bag, so replay it
     # once up front with transient_local durability rather than hunting for it
     # after every seek. RViz (and tf2) then has the whole frame tree.
-    _publish_tf_static(node, bag_dir, info, types, transient_qos)
+    _publish_tf_static(node, bag_dir, info, types, transient_qos, overrides=tf_overrides)
 
     # Services + status (for a future RViz panel / remote control).
     from std_msgs.msg import Float64, String
@@ -547,6 +603,20 @@ def _build_node(session_dir, bag_dir, videos, depths, rate, extra_topics=None):
     )
     status_pub = node.create_publisher(String, "/session/status", 10)
     status_text_pub = node.create_publisher(String, "/session/status_text", 10)
+
+    # Colour images adopt the frame_id of the recorded camera_info for their
+    # stream (which the player republishes), so RViz places them at the camera.
+    # BEST_EFFORT subscription: the player publishes camera_info with
+    # sensor-data QoS, which a RELIABLE subscriber cannot receive.
+    for stream in player._caps:
+        info_topic = camera_info_for(stream["spec"].get("record_topic") or "")
+        if not info_topic or info_topic not in types:
+            continue
+        node.create_subscription(
+            get_message(types[info_topic]), info_topic,
+            lambda msg, s=stream, t=info_topic: _adopt_video_frame(node, s, t, msg),
+            sensor_qos,
+        )
 
     def _tick():
         player.tick(node._player_dt)
@@ -576,6 +646,17 @@ def _jump(player, response, direction):
     response.success = True
     response.message = player.status()
     return response
+
+
+def _adopt_video_frame(node, stream, info_topic, msg):
+    """Use the recorded camera_info frame for a colour stream, once."""
+    frame_id = str(getattr(msg.header, "frame_id", ""))
+    if not frame_id or stream.get("frame_id"):
+        return
+    stream["frame_id"] = frame_id
+    node.get_logger().info(
+        f"[{stream['spec']['publish_topic']}] frame_id <- {frame_id} (from {info_topic})"
+    )
 
 
 def _seek_seconds(player, seconds):
@@ -647,6 +728,10 @@ def main(argv=None) -> int:
     parser.add_argument("--paused", action="store_true", help="Start paused")
     parser.add_argument("--no-rviz", action="store_true")
     parser.add_argument("--no-pointclouds", action="store_true")
+    parser.add_argument(
+        "--tf-override", action="append", default=[], metavar="SPEC",
+        help="Move a recorded frame: CHILD=[PARENT:]X,Y,Z[@ROLL,PITCH,YAW]; repeatable",
+    )
     args = parser.parse_args(argv)
 
     session = os.path.abspath(args.session_dir)
@@ -659,6 +744,13 @@ def main(argv=None) -> int:
         return 2
 
     _find_activities_prompt(session)
+    tf_overrides = merge_overrides(
+        load_overrides(session),
+        [parse_override_spec(spec) for spec in (args.tf_override or [])],
+    )
+    if tf_overrides:
+        print(f"TF overrides: {len(tf_overrides)} frame(s) will be moved "
+              f"({', '.join(ov['child'] for ov in tf_overrides)})")
     bag_topics = load_bag_topics(bag_dir)
     videos = discover_videos(session, load_expected(session))
     depths = [] if args.no_pointclouds else discover_depths(bag_topics)
@@ -672,7 +764,9 @@ def main(argv=None) -> int:
     import rclpy
 
     rclpy.init(args=[])
-    node, player = _build_node(session, bag_dir, videos, depths, args.rate, extras)
+    node, player = _build_node(
+        session, bag_dir, videos, depths, args.rate, extras, tf_overrides
+    )
     node.get_logger().info(
         f"Replaying {len(videos)} colour, {len(depths)} depth, "
         f"{len(extras)} extra topic(s) incl. /tf and {len(markers)} vicon marker topic(s)"

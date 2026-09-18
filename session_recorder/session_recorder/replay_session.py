@@ -31,6 +31,10 @@ Options:
   --no-pointclouds    skip depth->pointcloud reconstruction
   --no-rviz           don't launch RViz
   --rviz-config PATH  write/use a specific RViz config path
+  --tf-override SPEC  move a recorded frame, e.g.
+                      realsense_d55_1_link=-3.454,-0.404,1.022 (repeatable).
+                      A session can also ship <session>/tf_overrides.yaml; see
+                      session_recorder.tf_overrides for the format.
 """
 
 from __future__ import annotations
@@ -45,6 +49,12 @@ import sys
 import time
 
 import yaml
+
+from session_recorder.tf_overrides import (
+    load_overrides,
+    merge_overrides,
+    parse_override_spec,
+)
 
 # Replay the same vicon set the recorder kept: everything under /vicon/ except
 # the regenerable *visualization* MarkerArrays, plus the dynamic /tf stream
@@ -202,21 +212,60 @@ def _yaml_array(values: list[str]) -> str:
     return "[" + ", ".join(values) + "]"
 
 
-def bag_play_cmd(bag_dir: str, rate: float, loop: bool) -> list[str]:
+def bag_play_cmd(
+    bag_dir: str, rate: float, loop: bool, exclude_tf_static: bool = False
+) -> list[str]:
     cmd = ["ros2", "bag", "play", bag_dir, "--clock"]
     if rate != 1.0:
         cmd += ["--rate", str(rate)]
     if loop:
         cmd += ["--loop"]
+    if exclude_tf_static:
+        # tf_static_replay owns /tf_static in this mode so overridden frames do
+        # not arrive twice (with two parents) from the bag as well.
+        cmd += ["--exclude-topics", "/tf_static"]
     return cmd
 
 
-def video_publisher_cmd(specs: list[dict]) -> list[str]:
+def tf_static_replay_cmd(session_dir: str, override_specs: list[str]) -> list[str]:
+    # Run the module rather than the console script: the workspace is a
+    # --symlink-install, so new modules are importable straight from the mounted
+    # source, while a brand-new console script would need a colcon rebuild.
+    # (`ros2 run session_recorder tf_static_replay` works too, after a rebuild.)
+    cmd = [sys.executable, "-m", "session_recorder.tf_static_replay", session_dir]
+    for spec in override_specs:
+        cmd += ["--tf-override", spec]
+    return cmd
+
+
+def camera_info_for(topic: str) -> str:
+    """Sibling camera_info topic of an image topic (recorder naming rule)."""
+    clean = topic
+    for suffix in ("/compressedDepth", "/compressed"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+    if "/" not in clean:
+        return ""
+    return clean.rsplit("/", 1)[0] + "/camera_info"
+
+
+def video_publisher_cmd(specs: list[dict], bag_topics: dict | None = None) -> list[str]:
+    """Spawn the colour publisher, letting each stream adopt its recorded frame.
+
+    Without ``frame_id_topics`` the republished images carry an empty frame_id
+    and RViz draws them at the fixed frame instead of at the camera.
+    """
+    known = bag_topics or {}
+    info_topics = []
+    for spec in specs:
+        candidate = camera_info_for(spec.get("record_topic") or "")
+        info_topics.append(candidate if candidate in known else "")
     return [
         "ros2", "run", "session_recorder", "video_to_image_publisher", "--ros-args",
         "-p", f"videos:={_yaml_array([s['video'] for s in specs])}",
         "-p", f"timestamp_csvs:={_yaml_array([s['csv'] for s in specs])}",
         "-p", f"topics:={_yaml_array([s['publish_topic'] for s in specs])}",
+        "-p", f"frame_id_topics:={_yaml_array(info_topics)}",
     ]
 
 
@@ -497,6 +546,10 @@ def main(argv=None) -> int:
     parser.add_argument("--no-rviz", action="store_true", help="Don't launch RViz")
     parser.add_argument("--rviz-config", default=None, help="RViz config path")
     parser.add_argument(
+        "--tf-override", action="append", default=[], metavar="SPEC",
+        help="Move a recorded frame: CHILD=[PARENT:]X,Y,Z[@ROLL,PITCH,YAW]; repeatable",
+    )
+    parser.add_argument(
         "--list", action="store_true",
         help="Print discovered streams and exit (starts nothing)",
     )
@@ -512,6 +565,11 @@ def main(argv=None) -> int:
         print(f"ERROR: no bag*/metadata.yaml under {session}", file=sys.stderr)
         return 2
 
+    overrides = merge_overrides(
+        load_overrides(session),
+        [parse_override_spec(spec) for spec in (args.tf_override or [])],
+    )
+
     bag_topics = load_bag_topics(bag_dir)
     videos = [] if args.no_video else discover_videos(session, load_expected(session))
     depths = [] if args.no_pointclouds else discover_depths(bag_topics)
@@ -519,11 +577,20 @@ def main(argv=None) -> int:
     print(f"Session : {session}")
     print(f"Bag     : {bag_dir} ({len(bag_topics)} topics)")
     _describe(videos, depths)
+    if overrides:
+        source = os.path.join(session, "tf_overrides.yaml")
+        print(f"TF overrides ({source}):" if os.path.isfile(source) else "TF overrides:")
+        for ov in overrides:
+            x, y, z = ov["position"]
+            rotation = "explicit rotation" if ov.get("rotation") is not None else "recorded rotation"
+            print(f"  {ov['parent']} -> {ov['child']}  ({x:+.4f}, {y:+.4f}, {z:+.4f})  [{rotation}]")
     print()
 
     if args.list:
         rviz_config = args.rviz_config or os.path.join(session, "replay.rviz")
-        print(f"Would start: bag play, {len(videos)} video stream(s), "
+        print(f"Would start: bag play"
+              + (", tf_static_replay (overrides)" if overrides else "")
+              + f", {len(videos)} video stream(s), "
               f"{len(depths)} point cloud node(s)"
               + ("" if args.no_rviz else f", rviz ({rviz_config})"))
         return 0
@@ -531,11 +598,16 @@ def main(argv=None) -> int:
     procs: list[subprocess.Popen] = []
     bag_proc: subprocess.Popen | None = None
     try:
-        bag_proc = _spawn(bag_play_cmd(bag_dir, args.rate, args.loop))
+        bag_proc = _spawn(
+            bag_play_cmd(bag_dir, args.rate, args.loop, exclude_tf_static=bool(overrides))
+        )
         procs.append(bag_proc)
 
+        if overrides:
+            procs.append(_spawn(tf_static_replay_cmd(session, args.tf_override or [])))
+
         if videos:
-            procs.append(_spawn(video_publisher_cmd(videos)))
+            procs.append(_spawn(video_publisher_cmd(videos, bag_topics)))
         for spec in depths:
             procs.append(_spawn(pointcloud_cmd(spec)))
 
