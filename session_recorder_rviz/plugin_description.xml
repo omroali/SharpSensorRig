@@ -5,7 +5,8 @@
     base_class_type="rviz_common::Panel">
     <description>
       Shows the SHARP session player's play/pause state, position and current
-      activity (from /session/status_text). Dock it wherever you like.
+      activity (from /session/status_text), with buttons that jump to the
+      previous / next activity. Dock it wherever you like.
     </description>
   </class>
 </library>
