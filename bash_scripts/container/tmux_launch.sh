@@ -31,7 +31,7 @@ launch_window "vicon" "ros2 launch vicon_receiver all.launch.py"
 launch_window "calib" "ros2 run kinect2_bridge vicon_marker_calibration_tf.py"
 
 # Velodyne (device IP + pose come from $SENSOR_CONFIG_DIR/velodyne.yaml)
-# launch_window "velodyne" "ros2 launch velodyne velodyne_with_tf.launch.py"
+launch_window "velodyne" "ros2 launch velodyne velodyne_with_tf.launch.py"
 
 # RViz
 launch_window "rviz" "rviz2 -d \$(ros2 pkg prefix kinect2_bridge)/share/kinect2_bridge/launch/kinect_viz.rviz"

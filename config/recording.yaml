@@ -7,8 +7,8 @@
 # rebuild needed, just restart the recording service.
 
 recording_settings:
-  output_root: "/home/ubuntu/data"
-  uuid: "daniel-trial-capture"
+  output_root: "/home/ubuntu/"
+  uuid: "a29e0055-b0cb-4f81-b2d5-30c1db6b48ec"
 
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),
