@@ -1,11 +1,35 @@
 #!/usr/bin/env python3
-"""H.265 video recorder for camera colour/IR streams (any sensor)."""
+"""H.265/H.264 video recorder for camera colour/IR streams (any sensor).
+
+Encoder policy (2026-10-01 incident)
+------------------------------------
+The encoder used to be hardcoded NVENC with no fallback, no retry and no
+escalation. When the host's NVIDIA driver/library pair drifted, ffmpeg could not
+initialise ``h264_nvenc``, every stream died within seconds of the start and all
+four videos were left at 0 bytes — unnoticed until after the participant left.
+
+This recorder now:
+
+* probes the requested encoder with the same 0.1 s encode the operator
+  pre-flight uses (:func:`session_recorder.video_encoding.probe_encoder`);
+* falls back to libx264/libx265 when NVENC cannot initialise, and says so in the
+  log and in ``videos/encoder_status.json`` (the manager echoes that onto the
+  operator's console);
+* retries a stream once with the software encoder if ffmpeg dies *before writing
+  a single frame* (the incident's exact failure mode — the 0-byte file is
+  overwritten, nothing is lost), keeping the first failure log as
+  ``<stem>.ffmpeg.log.attempt1``;
+* records every permanent stream loss in ``videos/stream_failures.json`` so the
+  manager can turn it into a console alarm;
+* stops cleanly on SIGTERM/SIGHUP, finalising the mp4 instead of truncating it.
+"""
 
 import csv
 import os
 import subprocess
 import threading
 from collections import deque
+from datetime import datetime
 
 import rclpy
 from rclpy.node import Node
@@ -13,7 +37,13 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
 
-from session_recorder.video_encoding import build_encoder_args, keyframe_interval
+from session_recorder import hardening
+from session_recorder.video_encoding import (
+    EncoderResolver,
+    build_encoder_args,
+    keyframe_interval,
+    software_fallback_for,
+)
 
 
 def topic_to_filename(topic: str) -> str:
@@ -49,6 +79,69 @@ def calibration_done(timestamps_ns: list[int]) -> bool:
     return elapsed >= CALIBRATION_MAX_WAIT_S
 
 
+def file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def usable_fallback(
+    resolver: EncoderResolver, requested: str, effective: str
+) -> str | None:
+    """The software encoder to retry a stream with, if the probe says it works.
+
+    Probes are cached per encoder, so this costs nothing when the fallback was
+    already probed as part of resolving the stream.
+    """
+    fallback = software_fallback_for(requested)
+    if not fallback or not resolver.allow_software_fallback or fallback == effective:
+        return None
+    return fallback if resolver.probe_result(fallback).ok else None
+
+
+class StreamFailureLog:
+    """Per-stream failure record written where the manager can see it.
+
+    The manager polls ``videos/stream_failures.json`` (see
+    ``hardening.read_stream_failures``) and prints anything new on the console,
+    because this node's own stdout lives in a log file nobody reads mid-session.
+    """
+
+    def __init__(self, videos_dir: str, logger=None):
+        self._path = os.path.join(videos_dir, hardening.STREAM_FAILURES_NAME)
+        self._logger = logger
+        self._lock = threading.Lock()
+        self._failures: dict[str, dict] = {}
+
+    def record(self, topic: str, reason: str, frames: int = 0, severity: str = "error"):
+        with self._lock:
+            self._failures[str(topic)] = {
+                "topic": str(topic),
+                "reason": str(reason),
+                "frames": int(frames),
+                "severity": str(severity),
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            snapshot = dict(self._failures)
+        try:
+            hardening.write_atomic_json(
+                self._path,
+                {
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    "failures": snapshot,
+                },
+            )
+        except OSError as exc:  # pragma: no cover - disk full etc.
+            if self._logger is not None:
+                self._logger.warn(f"could not write {self._path}: {exc}")
+
+    @property
+    def failures(self) -> dict[str, dict]:
+        with self._lock:
+            return dict(self._failures)
+
+
 class StreamRecorder:
     def __init__(
         self,
@@ -59,6 +152,8 @@ class StreamRecorder:
         fps: float,
         max_queue: int,
         logger,
+        resolver: EncoderResolver,
+        failures: StreamFailureLog,
     ):
         self.topic = topic
         self.logger = logger
@@ -74,6 +169,9 @@ class StreamRecorder:
         self._dropped = 0
         self._skipped = 0
         self._max_queue = max(1, max_queue)
+        self._failures = failures
+        self._failed = False
+        self._retried = False
 
         stem = topic_to_filename(topic)
         self._video_path = os.path.join(output_dir, f"{stem}.mp4")
@@ -84,15 +182,25 @@ class StreamRecorder:
         # realsense2_camera convention (/color/) and the flat PoE DDS
         # convention (_Color).
         if ("/color/" in topic or "_Color" in topic) and encoder == "hevc_nvenc":
-            self._encoder = "h264_nvenc"
+            requested = "h264_nvenc"
         else:
-            self._encoder = encoder
+            requested = encoder
+        # Probe once per encoder: an unusable NVENC falls back to libx264/libx265
+        # instead of silently writing 0-byte files.
+        decision = resolver.resolve(requested, topic)
+        self._encoder = decision.effective
+        self._requested_encoder = decision.requested
+        self._retry_encoder = usable_fallback(resolver, requested, self._encoder)
         self._fps = fps
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps > 0 else 0
         self._next_emit_ts_ns = 0
         self._stderr_file = None
         self._calibrating = True
         self._calib_frames: list[tuple[bytes, int, int, int]] = []
+        self._width = 0
+        self._height = 0
+        self._pixel_fmt = ""
+        self._mux_fps = fps
         self._worker = threading.Thread(target=self._writer_loop, daemon=True)
         self._worker.start()
 
@@ -148,12 +256,13 @@ class StreamRecorder:
             out[row * row_bytes : (row + 1) * row_bytes] = data[start:end]
         return bytes(out)
 
-    def _start(self, width: int, height: int, pixel_fmt: str, mux_fps: float):
+    def _open_outputs(self):
         self._csv_file = open(self._csv_path, "w", newline="")
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
 
-        encoder_args = build_encoder_args(self._encoder, self._crf, mux_fps)
+    def _spawn_ffmpeg(self):
+        encoder_args = build_encoder_args(self._encoder, self._crf, self._mux_fps)
 
         cmd = [
             "ffmpeg",
@@ -163,11 +272,11 @@ class StreamRecorder:
             "-vcodec",
             "rawvideo",
             "-pix_fmt",
-            pixel_fmt,
+            self._pixel_fmt,
             "-s",
-            f"{width}x{height}",
+            f"{self._width}x{self._height}",
             "-r",
-            str(mux_fps),
+            str(self._mux_fps),
             "-i",
             "pipe:0",
             *encoder_args,
@@ -178,9 +287,11 @@ class StreamRecorder:
 
         self.logger.info(
             f"[{self.topic}] Starting ffmpeg -> {self._video_path}\n"
-            f"  encoder={self._encoder} crf={self._crf} "
-            f"{width}x{height} @ {mux_fps}fps (configured {self._fps}fps) "
-            f"gop={keyframe_interval(mux_fps)} pixel_fmt={pixel_fmt}"
+            f"  encoder={self._encoder} (requested {self._requested_encoder}) "
+            f"crf={self._crf} "
+            f"{self._width}x{self._height} @ {self._mux_fps}fps "
+            f"(configured {self._fps}fps) "
+            f"gop={keyframe_interval(self._mux_fps)} pixel_fmt={self._pixel_fmt}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
@@ -190,7 +301,90 @@ class StreamRecorder:
             stdout=subprocess.DEVNULL,
             stderr=self._stderr_file,
         )
+
+    def _close_ffmpeg(self, wait_s: float = 30.0):
+        """Close the current ffmpeg; safe to call on an already-dead process.
+
+        ``wait_s`` matters: on a stop ffmpeg still has to flush and, because of
+        ``-movflags +faststart``, rewrite the moov atom — killing it early would
+        leave exactly the truncated, unplayable mp4 this incident was about.
+        """
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=wait_s)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        for handle in (self._csv_file, self._stderr_file):
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+        self._csv_file = None
+        self._stderr_file = None
+
+    def _start(self, width: int, height: int, pixel_fmt: str, mux_fps: float):
+        self._width = width
+        self._height = height
+        self._pixel_fmt = pixel_fmt
+        self._mux_fps = mux_fps
+        self._open_outputs()
+        self._spawn_ffmpeg()
         self._started = True
+
+    def _fail_stream(self, reason: str):
+        self._failed = True
+        self.logger.error(f"[{self.topic}] VIDEO LOSS: {reason}")
+        self._failures.record(self.topic, reason, self.frame_idx, severity="error")
+
+    def _retry_with_software_encoder(self, frame) -> bool:
+        """One software-encoder restart, only if nothing was written yet.
+
+        Restarting a stream that has already produced frames would truncate the
+        mp4 (``ffmpeg -y``), so this refuses to do that: mid-session death is
+        reported as a loss instead.
+        """
+        with self._lock:
+            if (
+                self._stopping
+                or self._retry_encoder is None
+                or self._retried
+                or self.frame_idx > 0
+            ):
+                return False
+            self._retried = True
+            failed_encoder = self._encoder
+            self._encoder = self._retry_encoder
+        attempt_log = f"{self._log_path}.attempt1"
+        try:
+            self._close_ffmpeg()
+            if os.path.exists(self._log_path):
+                os.replace(self._log_path, attempt_log)
+            self._open_outputs()
+            self._spawn_ffmpeg()
+        except Exception as exc:
+            self._fail_stream(
+                f"software-encoder retry ({self._encoder}) could not start: {exc}"
+            )
+            return False
+        reason = (
+            f"encoder {failed_encoder} died before writing any frame; "
+            f"retried once with {self._encoder}"
+        )
+        self.logger.error(f"[{self.topic}] {reason}. First failure log: {attempt_log}")
+        self._failures.record(self.topic, reason, 0, severity="warn")
+        with self._cv:
+            self._frames.appendleft(frame)
+        return True
 
     def write(self, msg: Image):
         ts_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
@@ -248,55 +442,57 @@ class StreamRecorder:
                     self._cv.wait()
                 if self._stopping and not self._frames:
                     return
-                buffer, ts_ns, width, height = self._frames.popleft()
+                frame = self._frames.popleft()
 
             if self._proc is None or self._proc.poll() is not None:
-                self.logger.error(
-                    f"[{self.topic}] ffmpeg exited early. See {self._log_path}"
+                if self._retry_with_software_encoder(frame):
+                    continue
+                self._fail_stream(
+                    f"ffmpeg exited early (encoder={self._encoder}) after "
+                    f"{self.frame_idx} frames. See {self._log_path}"
                 )
                 return
 
             try:
-                self._proc.stdin.write(buffer)
+                self._proc.stdin.write(frame[0])
             except BrokenPipeError:
-                self.logger.error(
-                    f"[{self.topic}] ffmpeg pipe closed unexpectedly. See {self._log_path}"
+                if self._retry_with_software_encoder(frame):
+                    continue
+                self._fail_stream(
+                    f"ffmpeg pipe closed unexpectedly (encoder={self._encoder}) after "
+                    f"{self.frame_idx} frames. See {self._log_path}"
                 )
                 return
 
-            self._csv_writer.writerow([self.frame_idx, ts_ns])
+            self._csv_writer.writerow([self.frame_idx, frame[1]])
             self.frame_idx += 1
 
     def stop(self):
-        with self._lock:
-            if not self._started:
-                return
-            if rclpy.ok():
-                self.logger.info(
-                    f"[{self.topic}] Stopping - {self.frame_idx} frames written."
+        if self._started:
+            with self._lock:
+                if rclpy.ok():
+                    self.logger.info(
+                        f"[{self.topic}] Stopping - {self.frame_idx} frames written."
+                    )
+            with self._cv:
+                self._stopping = True
+                self._cv.notify_all()
+            self._worker.join(timeout=5.0)
+            self._close_ffmpeg()
+            if self._dropped and rclpy.ok():
+                self.logger.warn(
+                    f"[{self.topic}] Dropped {self._dropped} frames due to backpressure."
                 )
-        with self._cv:
-            self._stopping = True
-            self._cv.notify_all()
-        self._worker.join(timeout=5.0)
-        try:
-            self._proc.stdin.close()
-            self._proc.wait(timeout=30)
-        except Exception as exc:
-            if rclpy.ok():
-                self.logger.warn(f"[{self.topic}] ffmpeg shutdown error: {exc}")
-            self._proc.kill()
-        if self._csv_file:
-            self._csv_file.close()
-        if self._stderr_file:
-            self._stderr_file.close()
-        if self._dropped and rclpy.ok():
-            self.logger.warn(
-                f"[{self.topic}] Dropped {self._dropped} frames due to backpressure."
+
+        size = file_size(self._video_path)
+        if self._failed or size == 0:
+            self._fail_stream(
+                f"video file is {size} bytes after {self.frame_idx} frames "
+                f"({self._video_path})"
             )
-        if rclpy.ok():
+        elif rclpy.ok():
             self.logger.info(
-                f"[{self.topic}] Saved:\n"
+                f"[{self.topic}] Saved ({size} bytes):\n"
                 f"  video: {self._video_path}\n"
                 f"  timestamps: {self._csv_path}"
             )
@@ -320,6 +516,8 @@ class CompressedStreamRecorder:
         fps: float,
         max_queue: int,
         logger,
+        resolver: EncoderResolver,
+        failures: StreamFailureLog,
     ):
         self.topic = topic
         self.logger = logger
@@ -335,28 +533,38 @@ class CompressedStreamRecorder:
         self._dropped = 0
         self._skipped = 0
         self._max_queue = max(1, max_queue)
+        self._failures = failures
+        self._failed = False
+        self._retried = False
 
         stem = topic_to_filename(topic)
         self._video_path = os.path.join(output_dir, f"{stem}.mp4")
         self._csv_path = os.path.join(output_dir, f"{stem}.csv")
         self._log_path = os.path.join(output_dir, f"{stem}.ffmpeg.log")
         self._crf = crf
-        self._encoder = "h264_nvenc" if encoder == "hevc_nvenc" else encoder
+        requested = "h264_nvenc" if encoder == "hevc_nvenc" else encoder
+        decision = resolver.resolve(requested, topic)
+        self._encoder = decision.effective
+        self._requested_encoder = decision.requested
+        self._retry_encoder = usable_fallback(resolver, requested, self._encoder)
         self._fps = fps
         self._frame_interval_ns = int(1_000_000_000 / fps) if fps > 0 else 0
         self._next_emit_ts_ns = 0
         self._stderr_file = None
         self._calibrating = True
         self._calib_frames: list[tuple[bytes, int]] = []
+        self._mux_fps = fps
+        self._input_format = ""
         self._worker = threading.Thread(target=self._writer_loop, daemon=True)
         self._worker.start()
 
-    def _start(self, fmt_hint: str, mux_fps: float):
+    def _open_outputs(self):
         self._csv_file = open(self._csv_path, "w", newline="")
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(["frame_idx", "ros_timestamp_ns"])
 
-        encoder_args = build_encoder_args(self._encoder, self._crf, mux_fps)
+    def _spawn_ffmpeg(self):
+        encoder_args = build_encoder_args(self._encoder, self._crf, self._mux_fps)
 
         cmd = [
             "ffmpeg",
@@ -364,7 +572,7 @@ class CompressedStreamRecorder:
             "-f",
             "image2pipe",
             "-framerate",
-            str(mux_fps),
+            str(self._mux_fps),
             "-vcodec",
             "mjpeg",
             "-i",
@@ -377,9 +585,10 @@ class CompressedStreamRecorder:
 
         self.logger.info(
             f"[{self.topic}] Starting ffmpeg (compressed) -> {self._video_path}\n"
-            f"  encoder={self._encoder} crf={self._crf} @ {mux_fps}fps "
-            f"(configured {self._fps}fps) gop={keyframe_interval(mux_fps)} "
-            f"input_format={fmt_hint}"
+            f"  encoder={self._encoder} (requested {self._requested_encoder}) "
+            f"crf={self._crf} @ {self._mux_fps}fps "
+            f"(configured {self._fps}fps) gop={keyframe_interval(self._mux_fps)} "
+            f"input_format={self._input_format}"
         )
 
         self._stderr_file = open(self._log_path, "w", encoding="utf-8")
@@ -389,7 +598,77 @@ class CompressedStreamRecorder:
             stdout=subprocess.DEVNULL,
             stderr=self._stderr_file,
         )
+
+    def _close_ffmpeg(self, wait_s: float = 30.0):
+        """Close the current ffmpeg; ``wait_s`` covers the faststart rewrite."""
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=wait_s)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        for handle in (self._csv_file, self._stderr_file):
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+        self._csv_file = None
+        self._stderr_file = None
+
+    def _start(self, fmt_hint: str, mux_fps: float):
+        self._input_format = fmt_hint
+        self._mux_fps = mux_fps
+        self._open_outputs()
+        self._spawn_ffmpeg()
         self._started = True
+
+    def _fail_stream(self, reason: str):
+        self._failed = True
+        self.logger.error(f"[{self.topic}] VIDEO LOSS: {reason}")
+        self._failures.record(self.topic, reason, self.frame_idx, severity="error")
+
+    def _retry_with_software_encoder(self, frame) -> bool:
+        with self._lock:
+            if (
+                self._stopping
+                or self._retry_encoder is None
+                or self._retried
+                or self.frame_idx > 0
+            ):
+                return False
+            self._retried = True
+            failed_encoder = self._encoder
+            self._encoder = self._retry_encoder
+        attempt_log = f"{self._log_path}.attempt1"
+        try:
+            self._close_ffmpeg()
+            if os.path.exists(self._log_path):
+                os.replace(self._log_path, attempt_log)
+            self._open_outputs()
+            self._spawn_ffmpeg()
+        except Exception as exc:
+            self._fail_stream(
+                f"software-encoder retry ({self._encoder}) could not start: {exc}"
+            )
+            return False
+        reason = (
+            f"encoder {failed_encoder} died before writing any frame; "
+            f"retried once with {self._encoder}"
+        )
+        self.logger.error(f"[{self.topic}] {reason}. First failure log: {attempt_log}")
+        self._failures.record(self.topic, reason, 0, severity="warn")
+        with self._cv:
+            self._frames.appendleft(frame)
+        return True
 
     def write(self, msg: CompressedImage):
         ts_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
@@ -452,55 +731,57 @@ class CompressedStreamRecorder:
                     self._cv.wait()
                 if self._stopping and not self._frames:
                     return
-                buffer, ts_ns = self._frames.popleft()
+                frame = self._frames.popleft()
 
             if self._proc is None or self._proc.poll() is not None:
-                self.logger.error(
-                    f"[{self.topic}] ffmpeg exited early. See {self._log_path}"
+                if self._retry_with_software_encoder(frame):
+                    continue
+                self._fail_stream(
+                    f"ffmpeg exited early (encoder={self._encoder}) after "
+                    f"{self.frame_idx} frames. See {self._log_path}"
                 )
                 return
 
             try:
-                self._proc.stdin.write(buffer)
+                self._proc.stdin.write(frame[0])
             except BrokenPipeError:
-                self.logger.error(
-                    f"[{self.topic}] ffmpeg pipe closed unexpectedly. See {self._log_path}"
+                if self._retry_with_software_encoder(frame):
+                    continue
+                self._fail_stream(
+                    f"ffmpeg pipe closed unexpectedly (encoder={self._encoder}) after "
+                    f"{self.frame_idx} frames. See {self._log_path}"
                 )
                 return
 
-            self._csv_writer.writerow([self.frame_idx, ts_ns])
+            self._csv_writer.writerow([self.frame_idx, frame[1]])
             self.frame_idx += 1
 
     def stop(self):
-        with self._lock:
-            if not self._started:
-                return
-            if rclpy.ok():
-                self.logger.info(
-                    f"[{self.topic}] Stopping - {self.frame_idx} frames written."
+        if self._started:
+            with self._lock:
+                if rclpy.ok():
+                    self.logger.info(
+                        f"[{self.topic}] Stopping - {self.frame_idx} frames written."
+                    )
+            with self._cv:
+                self._stopping = True
+                self._cv.notify_all()
+            self._worker.join(timeout=5.0)
+            self._close_ffmpeg()
+            if self._dropped and rclpy.ok():
+                self.logger.warn(
+                    f"[{self.topic}] Dropped {self._dropped} frames due to backpressure."
                 )
-        with self._cv:
-            self._stopping = True
-            self._cv.notify_all()
-        self._worker.join(timeout=5.0)
-        try:
-            self._proc.stdin.close()
-            self._proc.wait(timeout=30)
-        except Exception as exc:
-            if rclpy.ok():
-                self.logger.warn(f"[{self.topic}] ffmpeg shutdown error: {exc}")
-            self._proc.kill()
-        if self._csv_file:
-            self._csv_file.close()
-        if self._stderr_file:
-            self._stderr_file.close()
-        if self._dropped and rclpy.ok():
-            self.logger.warn(
-                f"[{self.topic}] Dropped {self._dropped} frames due to backpressure."
+
+        size = file_size(self._video_path)
+        if self._failed or size == 0:
+            self._fail_stream(
+                f"video file is {size} bytes after {self.frame_idx} frames "
+                f"({self._video_path})"
             )
-        if rclpy.ok():
+        elif rclpy.ok():
             self.logger.info(
-                f"[{self.topic}] Saved:\n"
+                f"[{self.topic}] Saved ({size} bytes):\n"
                 f"  video: {self._video_path}\n"
                 f"  timestamps: {self._csv_path}"
             )
@@ -516,6 +797,7 @@ class ColourVideoRecorder(Node):
         self.declare_parameter("output_dir", os.path.expanduser("~/recordings"))
         self.declare_parameter("crf", 18)
         self.declare_parameter("encoder", "hevc_nvenc")
+        self.declare_parameter("software_fallback", True)
         self.declare_parameter("fps", 30.0)
         self.declare_parameter("queue_size", 5)
         self.declare_parameter("max_queue", 30)
@@ -530,6 +812,7 @@ class ColourVideoRecorder(Node):
         output_dir = str(self.get_parameter("output_dir").value)
         crf = int(self.get_parameter("crf").value)
         encoder = str(self.get_parameter("encoder").value)
+        software_fallback = bool(self.get_parameter("software_fallback").value)
         fps = float(self.get_parameter("fps").value)
         queue_size = int(self.get_parameter("queue_size").value)
         max_queue = int(self.get_parameter("max_queue").value)
@@ -550,6 +833,14 @@ class ColourVideoRecorder(Node):
 
         os.makedirs(output_dir, exist_ok=True)
 
+        # Probe the encoders once, before any ffmpeg is spawned; the whole point
+        # of the 2026-10-01 fix is that this cannot silently fail later.
+        self._resolver = EncoderResolver(
+            requested=encoder, allow_software_fallback=software_fallback
+        )
+        self._failures = StreamFailureLog(output_dir, self.get_logger())
+        self._output_dir = output_dir
+
         self._recorders = {}
         self._subscriptions = []
         self._qos = QoSProfile(
@@ -561,7 +852,15 @@ class ColourVideoRecorder(Node):
         for topic in topics:
             topic_fps = fps_overrides.get(topic, fps)
             recorder = StreamRecorder(
-                topic, output_dir, crf, encoder, topic_fps, max_queue, self.get_logger()
+                topic,
+                output_dir,
+                crf,
+                encoder,
+                topic_fps,
+                max_queue,
+                self.get_logger(),
+                self._resolver,
+                self._failures,
             )
             self._recorders[topic] = recorder
             self._subscriptions.append(
@@ -576,7 +875,15 @@ class ColourVideoRecorder(Node):
         for topic in compressed_topics:
             topic_fps = fps_overrides.get(topic, fps)
             recorder = CompressedStreamRecorder(
-                topic, output_dir, crf, encoder, topic_fps, max_queue, self.get_logger()
+                topic,
+                output_dir,
+                crf,
+                encoder,
+                topic_fps,
+                max_queue,
+                self.get_logger(),
+                self._resolver,
+                self._failures,
             )
             self._recorders[topic] = recorder
             self._subscriptions.append(
@@ -588,10 +895,37 @@ class ColourVideoRecorder(Node):
                 )
             )
 
+        self._write_encoder_status()
+        self._log_encoder_summary()
+
         self.get_logger().info(
             f"Recording {len(topics)} raw + {len(compressed_topics)} compressed topics to {output_dir}"
             + (f"\n  fps overrides: {fps_overrides}" if fps_overrides else "")
         )
+
+    def _write_encoder_status(self):
+        """Hand the manager the encoder verdicts (console alarm + forensics)."""
+        payload = self._resolver.status_payload(
+            datetime.now().isoformat(timespec="seconds")
+        )
+        path = os.path.join(self._output_dir, hardening.ENCODER_STATUS_NAME)
+        try:
+            hardening.write_atomic_json(path, payload)
+        except OSError as exc:  # pragma: no cover - disk full etc.
+            self.get_logger().warn(f"could not write encoder status to {path}: {exc}")
+
+    def _log_encoder_summary(self):
+        for stream, decision in self._resolver.decisions.items():
+            if decision.ok and not decision.fallback_used:
+                self.get_logger().info(f"[{stream}] {decision.summary()}")
+            else:
+                self.get_logger().error(f"[{stream}] {decision.summary()}")
+        if self._resolver.fallback_used:
+            self.get_logger().error(
+                "SOFTWARE ENCODER FALLBACK ACTIVE: NVENC could not initialise; "
+                f"using {self._resolver.effective_encoders}. "
+                "Video will still be recorded, on the CPU."
+            )
 
     def destroy_node(self):
         for recorder in self._recorders.values():
@@ -601,17 +935,35 @@ class ColourVideoRecorder(Node):
                 self.destroy_subscription(subscription)
             except ValueError:
                 pass
+        failures = self._failures.failures
+        if failures:
+            self.get_logger().error(
+                f"{len(failures)} video stream(s) failed: "
+                + ", ".join(sorted(failures))
+                + f" (see {hardening.STREAM_FAILURES_NAME})"
+            )
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
+    # SIGTERM/SIGHUP must finalise the mp4 (moov atom) rather than truncate it;
+    # the manager forwards SIGINT on a graceful stop, but a supervisor or a
+    # killed terminal can send TERM/HUP directly. Installed before node
+    # construction so the encoder probe is covered too.
+    stop = hardening.StopRequest()
+    hardening.install_stop_handlers(stop)
     node = ColourVideoRecorder()
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not stop.requested:
+            rclpy.spin_once(node, timeout_sec=0.2)
     except KeyboardInterrupt:
         pass
+    except hardening.ros_shutdown_exceptions():
+        pass
     finally:
+        if stop.requested:
+            node.get_logger().warn(f"Stopping video recorder: {stop.reason()}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -13,7 +13,21 @@ recording_settings:
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),
   # hevc_amf (AMD).
+  #
+  # 2026-10-01: NVENC could not initialise (host driver/library mismatch,
+  # NVML 580.178) and every video came out at 0 bytes because there was no
+  # fallback. The recorder now probes the encoder before recording and falls
+  # back to libx264/libx265 when it cannot initialise; leave
+  # video_software_fallback: true unless CPU headroom is the binding problem.
   video_encoder: "hevc_nvenc"
+
+  # Probe the encoder at rig start and at every recording start (the same
+  # 0.1 s encode as the operator pre-flight). A failure is logged as an ERROR
+  # on the recording console instead of failing silently at capture time.
+  video_encoder_probe: true
+  # Fall back to the software encoder (h264_nvenc -> libx264,
+  # hevc_nvenc -> libx265) when the requested encoder will not initialise.
+  video_software_fallback: true
 
   # H.265 CRF, 0-51. Lower = better quality / larger files.
   #   18 visually lossless · 22 high · 28 good · 35 low
@@ -22,9 +36,37 @@ recording_settings:
   # Frame rate written to the .mp4 container; match the sensor rate.
   video_fps: 30.0
 
+  # Seconds to wait after /start_recording before treating a missing or
+  # 0-byte .mp4 as a failure and printing it on the recording console.
+  # (Recorders hold the first 2-5 s of frames back to measure the real fps.)
+  video_startup_grace_s: 20
+
   # ───────────────────────── Rosbag (depth/metadata) ───────────────────────
   # Storage format: mcap (recommended) or sqlite3.
   bag_storage: "mcap"
+
+  # Split the bag: with limits set, rosbag2 closes a finalised bag_N.mcap
+  # (footer + own index) every N seconds / MiB instead of writing one
+  # unbounded bag_0.mcap. On 2026-10-01 a single 9.19 GB mcap lost the whole
+  # 72-minute session to one crash; splitting caps that loss at one split.
+  # 0 disables a limit. Splitting works with every storage/compression mode.
+  bag_max_duration_s: 300      # 5 minutes per split
+  bag_max_size_mb: 1024        # or 1 GiB, whichever comes first
+
+  # Watchdog: poll the recorder children for the whole session (they used to
+  # be checked once, 0.2 s after launch). A dead bag recorder is restarted
+  # into a fresh bag_N/ directory; every event is logged and mirrored to
+  # <session>/watchdog.log and <session>/recorder_heartbeat.json.
+  watchdog:
+    enabled: true
+    interval_s: 5
+    restart_bag: true
+    restart_throttle: true
+
+  # Seconds a graceful stop lets the recorders drain before SIGKILL. This is
+  # the path that writes the MCAP footer, metadata.yaml and session_report.yaml.
+  # Keep it below docker-compose's stop_grace_period (60s).
+  stop_grace_s: 30
 
   # Bag compression. Options:
   #   none    - off

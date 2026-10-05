@@ -18,13 +18,14 @@ Usage: ros2 run session_recorder session_check <session_dir>
 
 from __future__ import annotations
 
-import glob
 import os
 import re
 import sys
 from datetime import datetime
 
 import yaml
+
+from session_recorder import hardening
 
 # A video/bag stream must span at least this fraction of the session,
 # otherwise its recorder died mid-take.
@@ -36,12 +37,40 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(handle) or {}
 
 
+def _bag_metadata_files(session_dir: str) -> list[str]:
+    """Every bag's ``metadata.yaml`` (bag/, bag_1/, ... bag_10/), oldest first.
+
+    A session can legitimately have several: splitting lives inside one bag dir
+    (``bag/bag_0.mcap``, ``bag_1.mcap``, ...), while a watchdog restart or a
+    second take in the same session creates a new ``bag_N/``. All of them are
+    part of the session and must be counted together.
+    """
+    return hardening.bag_metadata_files(session_dir)
+
+
 def _bag_metadata(session_dir: str) -> tuple[dict, str]:
-    """Find the session's bag metadata (bag/, bag_1/, ...)."""
-    candidates = sorted(glob.glob(os.path.join(session_dir, "bag*", "metadata.yaml")))
+    """Find the session's newest bag metadata (bag/, bag_1/, ...)."""
+    candidates = _bag_metadata_files(session_dir)
     if not candidates:
         return {}, ""
     return _load_yaml(candidates[-1]), candidates[-1]
+
+
+def _aggregate_bag_metadata(paths: list[str]) -> tuple[dict[str, int], float]:
+    """Sum per-topic message counts and durations over every bag of a session.
+
+    Splitting makes one bag dir hold many ``bag_N.mcap`` files but a single
+    ``metadata.yaml`` whose counts already cover all of them; a restart adds
+    further bag dirs, which must be added on top.
+    """
+    counts: dict[str, int] = {}
+    duration = 0.0
+    for path in paths:
+        metadata = _load_yaml(path)
+        for topic, count in _bag_topic_counts(metadata).items():
+            counts[topic] = counts.get(topic, 0) + count
+        duration += _bag_duration_s(metadata)
+    return counts, duration
 
 
 def _bag_topic_counts(metadata: dict) -> dict[str, int]:
@@ -182,9 +211,8 @@ def run_check(session_dir: str) -> int:
         (manifest.get("session", {}) or {}).get("min_rate_factor", 0.5)
     )
 
-    metadata, metadata_path = _bag_metadata(session_dir)
-    counts = _bag_topic_counts(metadata)
-    duration = _bag_duration_s(metadata)
+    metadata_paths = _bag_metadata_files(session_dir)
+    counts, duration = _aggregate_bag_metadata(metadata_paths)
     videos_dir = os.path.join(session_dir, "videos")
 
     checks: list[dict] = []
@@ -192,13 +220,13 @@ def run_check(session_dir: str) -> int:
     bag_expected = [e for e in expected if e.get("sink") == "bag"]
     video_expected = [e for e in expected if e.get("sink") == "video"]
 
-    if bag_expected and not metadata:
+    if bag_expected and not metadata_paths:
         checks.append({
             "topic": "<bag>", "sink": "bag", "status": "fail",
             "detail": "no bag metadata.yaml found",
         })
 
-    if metadata:
+    if metadata_paths:
         for entry in bag_expected:
             topic = str(entry["topic"])
             _check_rate(
@@ -238,7 +266,9 @@ def run_check(session_dir: str) -> int:
     report = {
         "session_dir": session_dir,
         "checked_at": datetime.now().isoformat(timespec="seconds"),
-        "bag_metadata": metadata_path,
+        "bag_metadata": metadata_paths[-1] if metadata_paths else "",
+        "bag_metadata_files": metadata_paths,
+        "bag_count": len(metadata_paths),
         "bag_duration_s": round(duration, 1),
         "status": status,
         "failed": len(failed),

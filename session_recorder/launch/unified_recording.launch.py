@@ -55,6 +55,8 @@ def launch_setup(context, *args, **kwargs):
     nexus_port = int(vicon_cfg.get("nexus_port", 3030))
     nexus_path = str(vicon_cfg.get("nexus_path", ""))
 
+    watchdog_cfg = recording_settings.get("watchdog", {}) or {}
+
     # launch_ros can't infer the element type of an empty STRING_ARRAY
     # (it ends up as () and fails validation). Pad with a single empty
     # string; the manager filters falsy entries on read.
@@ -103,6 +105,17 @@ def launch_setup(context, *args, **kwargs):
                     ),
                     "video_crf": recording_settings.get("video_crf", 18),
                     "video_fps": recording_settings.get("video_fps", 30.0),
+                    # Software encoder fallback: without it an unusable NVENC
+                    # silently produces 0-byte videos (2026-10-01).
+                    "video_software_fallback": bool(
+                        recording_settings.get("video_software_fallback", True)
+                    ),
+                    "video_encoder_probe": bool(
+                        recording_settings.get("video_encoder_probe", True)
+                    ),
+                    "video_startup_grace_s": float(
+                        recording_settings.get("video_startup_grace_s", 20.0)
+                    ),
                     "bag_storage": recording_settings.get("bag_storage", "mcap"),
                     "bag_compression": recording_settings.get(
                         "bag_compression", "none"
@@ -112,6 +125,26 @@ def launch_setup(context, *args, **kwargs):
                     ),
                     "bag_cache_size_mb": int(
                         recording_settings.get("bag_cache_size_mb", 128)
+                    ),
+                    # Split the bag so one crash costs at most one split.
+                    "bag_max_size_mb": float(
+                        recording_settings.get("bag_max_size_mb", 1024)
+                    ),
+                    "bag_max_duration_s": float(
+                        recording_settings.get("bag_max_duration_s", 300)
+                    ),
+                    "stop_grace_s": float(
+                        recording_settings.get("stop_grace_s", 30)
+                    ),
+                    "watchdog_enabled": bool(watchdog_cfg.get("enabled", True)),
+                    "watchdog_interval_s": float(
+                        watchdog_cfg.get("interval_s", 5.0)
+                    ),
+                    "watchdog_restart_bag": bool(
+                        watchdog_cfg.get("restart_bag", True)
+                    ),
+                    "watchdog_restart_throttle": bool(
+                        watchdog_cfg.get("restart_throttle", True)
                     ),
                     "nexus_capture": nexus_capture,
                     "nexus_host": nexus_host,

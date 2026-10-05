@@ -4,6 +4,79 @@ Everything below was implemented and unit-tested off-rig. These are the
 steps that need actual sensor/hardware access to confirm, plus what to watch
 during the first participant session.
 
+## Pre-flight — run before every session (added 2026-10-05)
+
+The 2026-10-01 session lost its bag (tmux segfault, unfinalised mcap) and all
+four videos (NVENC could not initialise, 0-byte files). These are the checks
+that prove the fixes on the real rig. Nothing here needs the sensors.
+
+### 0.1 Encoder path — the one-line check
+
+Inside the rig container (`record` pane is fine), or from the host checkout:
+
+```bash
+# inside the container:
+bash /home/ubuntu/bash_scripts/check_encoder.sh
+
+# or from SharpSensorRig/ on the host:
+docker compose -f docker/docker-compose.yml run --rm sharp-sensor-rig \
+    bash /home/ubuntu/bash_scripts/check_encoder.sh
+```
+
+Proves success: the last line is `RESULT: HARDWARE OK` (NVENC works) or
+`RESULT: SOFTWARE FALLBACK` with `libx264`/`libx265` (CPU encoding — video is
+still recorded, expect higher CPU and larger files). Either is usable;
+`RESULT: FAIL` means every `.mp4` would be 0 bytes — do not start a session.
+
+The host GPU stack is currently broken (`nvidia-smi` → NVML/driver/library
+version mismatch, NVML 580.178), so **software fallback is expected** until the
+driver is realigned. Realigning it needs `sudo` and a reboot:
+
+```bash
+# host, needs sudo and a reboot — not done from this repo
+sudo apt install --reinstall nvidia-driver-<version>   # match `modinfo nvidia | head`
+sudo reboot
+nvidia-smi                                             # must list the GPU
+```
+
+### 0.2 What the recording should show from now on
+
+- `/start_recording` prints the split policy, e.g.
+  `bag splitting: max 1024 MiB / 300 s per split`.
+- Within ~5 s the console either says `WATCHDOG: video check OK - N stream(s)
+  writing non-empty files`, or names the offending stream. If NVENC is down you
+  also get `WATCHDOG: VIDEO ENCODER FALLBACK ACTIVE: …`.
+- `<session>/bag/` contains `bag_0.mcap`, `bag_1.mcap`, … once a split rolls
+  over (5 minutes), plus one `metadata.yaml` covering them all.
+- `<session>/recorder_heartbeat.json` is rewritten every ~5 s while recording
+  (this is what a host-side watchdog can poll), and `<session>/watchdog.log`
+  records alarm/note lines.
+- Killing the terminal is now survivable: `SIGHUP`/`SIGTERM` to the manager
+  runs the same teardown as `stop`
+
+### 0.3 Three rig-side tests worth 10 minutes (from the re-run gate)
+
+```bash
+# 1. Split rollover: record for >5 minutes, then
+ls -l <session>/bag/            # expect bag_0.mcap AND bag_1.mcap
+yaml=$(ls <session>/bag*/metadata.yaml)  # expect exactly one per bag dir
+# 2. Abrupt kill: kill -9 the rosbag2 process mid-recording; every *completed*
+#    split must still open (metadata.yaml is written by rosbag2 on graceful
+#    stop, so expect it to be missing for the killed run - that is why splits
+#    exist; recover with `mcap recover bag_N.mcap -o bag_N_recovered.mcap`).
+# 3. Terminal-death test: kill the tmux server, then check the console/log for
+#    "Stopping recording (SIGHUP received)" and a session_report.yaml.
+```
+
+### 0.4 Container logs now survive the container
+
+`docker compose run --rm` used to take the json-file log with it. The service
+now logs to journald, so after the container is gone:
+
+```bash
+journalctl -t sharp-rig --since "3 hours ago" | tail -100
+```
+
 ## 0. Build (both packages changed)
 
 ```bash
