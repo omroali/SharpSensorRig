@@ -163,18 +163,18 @@ RUN echo '[ -f $HOME/bash_scripts/bashrc_extensions.sh ] && \
     source $HOME/bash_scripts/bashrc_extensions.sh' \
     >> /home/${USERNAME}/.bashrc
 
+# Shared workspace build script. The same file is used here, by the
+# shell-startup auto-build, and by the `wbuild` alias -- at runtime they pick it
+# up from the bash_scripts bind mount rather than this image layer.
+COPY --chown=${USERNAME}:${USERNAME} bash_scripts/container/build_ws.sh ${BASH_SCRIPTS}/build_ws.sh
+
 # Pre-build the workspace at image-build time so that starting a container
 # (docker compose run --rm ...) no longer triggers a full colcon build.
 # The compiler/env mirror the runtime values in docker-compose.yml so the
 # baked build behaves identically to the previous on-start build.
 # Source changes that need a rebuild can still be applied with `wbuild`.
+
 RUN /bin/bash -c "source /opt/ros/jazzy/setup.bash \
-    && cd ${BASE_WS} \
-    && CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 \
-       CFLAGS=-fno-tree-fre CXXFLAGS=-fno-tree-fre MAKEFLAGS=-j1 \
-       colcon build --symlink-install \
-       --cmake-args -DCMAKE_BUILD_TYPE=Release \
-       -Drealsense2_DIR=/usr/local/lib/cmake/realsense2 \
-    && rm -f install/COLCON_IGNORE"
+    && CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 ${BASH_SCRIPTS}/build_ws.sh"
 
 CMD ["bin/bash"]

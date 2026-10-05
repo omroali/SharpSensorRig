@@ -32,9 +32,7 @@ if [ ! -f "install/setup.bash" ] || [ "$1" == "--rebuild" ]; then
     fi
 
     echo "Running colcon build..."
-    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -Drealsense2_DIR=/usr/local/lib/cmake/realsense2
-    rm -f install/COLCON_IGNORE  # prevent blocking ament discovery
-    if [ $? -ne 0 ]; then
+    if ! bash "$HOME/bash_scripts/build_ws.sh"; then
         echo "Error: colcon build failed! Please check the build output above."
         echo "To retry, run: wbuild --rebuild"
     fi
@@ -105,7 +103,7 @@ alias refresh_usb="bash $HOME/bash_scripts/refresh_usb.sh"
 
 # Force a clean rebuild (deletes build/ install/ log/ first)
 alias wclean="rm -rf ${BASE_WS}/build ${BASE_WS}/install ${BASE_WS}/log && echo 'Workspace cleaned.'"
-alias wbuild="cd ${BASE_WS} && wclean && colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -Drealsense2_DIR=/usr/local/lib/cmake/realsense2 && source ${BASE_WS}/install/setup.bash"
+alias wbuild="bash $HOME/bash_scripts/build_ws.sh --clean && source ${BASE_WS}/install/setup.bash"
 
 # Mark that the setup has been run in this shell session
 export _ROS_WORKSPACE_SETUP_RUN=true
