@@ -41,8 +41,32 @@ echo "Ensuring Docker image is up to date..."
 # No explicit 'build' command is needed for this workflow.
 
 # --- Check and Stop/Remove existing container ---
-echo "Running docker compose down to ensure a clean start..."
-docker compose -f "${COMPOSE_FILE}" down --remove-orphans > /dev/null 2>&1 || true
+# 2026-10-01: this used to run `docker compose down --remove-orphans`
+# unconditionally on every start. That kills a live recording — and with it the
+# MCAP footer, metadata.yaml and session_report.yaml — so now it only cleans up
+# when nothing is running, or when the operator explicitly asks for it.
+RUNNING_IDS="$(docker ps -q --filter 'ancestor=sharp-sensor-rig' 2>/dev/null || true)"
+if [ -z "${RUNNING_IDS}" ]; then
+    RUNNING_IDS="$(docker compose -f "${COMPOSE_FILE}" ps -q 2>/dev/null || true)"
+fi
+if [ -n "${RUNNING_IDS}" ]; then
+    if [ "${SHARP_FORCE_CLEAN:-0}" = "1" ]; then
+        echo "SHARP_FORCE_CLEAN=1: removing the running rig container(s): ${RUNNING_IDS}"
+        echo "Any active recording is being destroyed."
+        docker compose -f "${COMPOSE_FILE}" down --remove-orphans > /dev/null 2>&1 || true
+    else
+        echo "Refusing to start: the rig container is already running."
+        echo "  container id(s): ${RUNNING_IDS}"
+        echo "'docker compose down --remove-orphans' would kill the running rig and any live recording."
+        echo "If a session is recording, stop it first (in the rig's 'record' pane: stop), wait for the"
+        echo "'session_check:' line, then re-run this script."
+        echo "To discard the running rig anyway: SHARP_FORCE_CLEAN=1 $0"
+        exit 1
+    fi
+else
+    echo "No rig container running; cleaning up stale resources..."
+    docker compose -f "${COMPOSE_FILE}" down --remove-orphans > /dev/null 2>&1 || true
+fi
 echo "Docker Compose cleanup completed."
 
 # --- Run the Docker Compose service interactively ---

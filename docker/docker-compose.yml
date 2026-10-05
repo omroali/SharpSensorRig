@@ -13,6 +13,24 @@ services:
         rs_sdk: /usr/local
     image: sharp-sensor-rig # resulting image name
 
+    # Keep the container's stdout/stderr on the host. With `docker compose run
+    # --rm` the json-file log died with the container on 2026-10-01, so the
+    # crash left nothing to inspect; journald retains it:
+    #   journalctl -t sharp-rig --since "1 hour ago"
+    logging:
+      driver: journald
+      options:
+        tag: sharp-rig
+
+    # Reap the zombies ROS spawns and let SIGTERM from `docker stop` reach the
+    # process tree instead of being swallowed by the interactive shell.
+    init: true
+
+    # A graceful stop must finalise the mcap (footer + metadata.yaml) and write
+    # session_report.yaml; the 10 s docker default is not enough. Keep this
+    # above recording.yaml -> stop_grace_s (30 s).
+    stop_grace_period: 60s
+
     stdin_open: true
     tty: true
     command: /bin/bash # default shell when you attach
