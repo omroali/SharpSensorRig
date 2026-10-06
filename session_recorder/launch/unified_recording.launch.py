@@ -103,8 +103,13 @@ def launch_setup(context, *args, **kwargs):
                     "video_encoder": recording_settings.get(
                         "video_encoder", "hevc_nvenc"
                     ),
-                    "video_crf": recording_settings.get("video_crf", 18),
-                    "video_fps": recording_settings.get("video_fps", 30.0),
+                    # Param types here must match the node's declarations, which
+                    # rclpy infers from the defaults in hardening.py: video_crf
+                    # is INTEGER (18), video_fps is DOUBLE (30.0). Casting
+                    # explicitly means a YAML edit such as `video_crf: 18.0`
+                    # cannot kill the node the way bag_max_size_mb did.
+                    "video_crf": int(recording_settings.get("video_crf", 18)),
+                    "video_fps": float(recording_settings.get("video_fps", 30.0)),
                     # Software encoder fallback: without it an unusable NVENC
                     # silently produces 0-byte videos (2026-10-01).
                     "video_software_fallback": bool(
@@ -127,7 +132,13 @@ def launch_setup(context, *args, **kwargs):
                         recording_settings.get("bag_cache_size_mb", 128)
                     ),
                     # Split the bag so one crash costs at most one split.
-                    "bag_max_size_mb": float(
+                    # INTEGER, not float: the node declares this from an int
+                    # default (hardening.DEFAULT_BAG_MAX_SIZE_MB = 1024), so an
+                    # override of 1024.0 was rejected at construction with
+                    # InvalidParameterTypeException and the manager died before
+                    # it could start. Every other split/grace value is declared
+                    # from a float default, which is why only this one broke.
+                    "bag_max_size_mb": int(
                         recording_settings.get("bag_max_size_mb", 1024)
                     ),
                     "bag_max_duration_s": float(
@@ -156,8 +167,51 @@ def launch_setup(context, *args, **kwargs):
     ]
 
 
+def _align_nvidia_driver_libs() -> None:
+    """Point the container's driver userspace at the host kernel module version.
+
+    The image installs Ubuntu's libnvidia-compute (580.178.04 here) while this
+    host runs the Pop!_OS driver (580.173.02). The container runtime injects the
+    host's libcuda/libnvidia-ml as well, but does not overwrite the .so.1
+    symlinks the image created, so the loader picks the mismatched userspace:
+    NVML reports a driver/library mismatch and libcuda's forward-compat path
+    fails on consumer GeForce hardware, which made every colour stream record 0
+    bytes on 2026-10-01.
+
+    Doing this here -- synchronously, while the launch description is built --
+    guarantees it happens before the recording manager node constructs and runs
+    its encoder probe, whatever shell or entry point invoked the launch. The
+    script is idempotent and non-fatal: any failure is reported and ignored so a
+    broken workaround can never stop the rig from coming up (the encoder probe
+    and CPU fallback still decide correctly on their own).
+    """
+    script = os.path.join(
+        os.environ.get("BASH_SCRIPTS_DIR", "/home/ubuntu/bash_scripts"),
+        "align_nvidia_driver_libs.sh",
+    )
+    if not os.path.isfile(script):
+        return
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["bash", script, "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.stdout.strip():
+            print(f"[unified_recording] {proc.stdout.strip()}")
+    except Exception as exc:  # never let a housekeeping step break the launch
+        print(f"[unified_recording] driver-library alignment skipped: {exc}")
+
+
 def generate_launch_description():
     base_ws = os.environ.get("BASE_WS", "/home/ubuntu/base_ws")
+
+    # Must run before the node is constructed: the manager probes the encoder as
+    # part of its own startup and would otherwise fall back to the CPU encoder.
+    _align_nvidia_driver_libs()
 
     # Fallback paths point at the old per-package configs so the launch
     # still works outside the container / without SENSOR_CONFIG_DIR.

@@ -21,6 +21,16 @@ echo "Navigated to ROS 2 workspace: $(pwd)"
 sudo ldconfig 2>/dev/null || true
 export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 
+# Align the NVIDIA driver userspace with the host kernel module. The image ships
+# Ubuntu's libnvidia-compute, which is NEWER than this host's driver, and the
+# container runtime does not overwrite the image's .so.1 symlinks -- so without
+# this, NVENC cannot initialise and every colour stream records 0 bytes, even
+# though the fix "looks" like a host driver problem. Fast and idempotent: a few
+# readlink()s once aligned. Runs here so that a bare `ros2 launch` typed in a
+# shell is covered, not just the tmux/check_encoder entry points.
+[ -f "$HOME/bash_scripts/align_nvidia_driver_libs.sh" ] && \
+    bash "$HOME/bash_scripts/align_nvidia_driver_libs.sh" --quiet
+
 # Check if setup.bash already exists (meaning it might have been built before)
 # and only build if it hasn't or if a rebuild is explicitly requested.
 if [ ! -f "install/setup.bash" ] || [ "$1" == "--rebuild" ]; then
