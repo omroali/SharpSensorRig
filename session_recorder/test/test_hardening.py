@@ -300,3 +300,43 @@ def test_color_command_only_passes_declared_recorder_parameters():
     assert passed <= declared, sorted(passed - declared)
     assert "software_fallback" in passed  # the encoder fallback must be plumbed
 
+
+
+# --- session_check_summary -------------------------------------------------
+
+def test_summary_ignores_ros2run_launcher_noise():
+    """The regression: `ros2 run` appends its exit line AFTER the check's own
+    summary, so a naive "last line" parse reported launcher boilerplate instead
+    of the one line the operator reads at the end of a session."""
+    stdout = (
+        "[FAIL] /vicon/marker_sizes: rate 0.84 Hz below minimum 60.00 Hz\n"
+        "[FAIL] /kinect2_1/sd/image_depth: no messages recorded\n"
+        "FAIL: 18/97 checks ok, 0 warnings (/data/x/session_report.yaml)\n"
+        "[ros2run]: Process exited with failure 1\n"
+    )
+    got = hardening.session_check_summary(stdout)
+    assert got.startswith("FAIL: 18/97 checks ok")
+    assert "ros2run" not in got
+    assert "session_report.yaml" in got
+
+
+def test_summary_of_a_passing_check():
+    stdout = (
+        "PASS: 97/97 checks ok, 0 warnings (/data/x/session_report.yaml)\n"
+        "[ros2run]: Process exited with status 0\n"
+    )
+    assert hardening.session_check_summary(stdout).startswith("PASS: 97/97")
+
+
+def test_summary_never_returns_blank_when_only_noise_is_present():
+    """A future launcher change must degrade to *something*, not to an empty
+    summary that reads as 'session_check: PASS ()'."""
+    noise = "[ros2run]: Process exited with failure 1"
+    assert hardening.session_check_summary(noise) == noise
+    assert hardening.session_check_summary("") == ""
+    assert hardening.session_check_summary("   \n  \n") == ""
+
+
+def test_summary_handles_multiline_failure_detail():
+    stdout = "FAIL: 1/97 checks ok\nmore detail\n[ERROR] [launch]: something\n"
+    assert hardening.session_check_summary(stdout) == "more detail"

@@ -402,8 +402,11 @@ class RecordingManager(Node):
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.get_logger().error(f"session_check failed to run: {exc}")
             return "session_check: FAILED TO RUN"
-        summary = (result.stdout or "").strip().splitlines()
-        summary = summary[-1] if summary else ""
+        # The check prints its own summary, but `ros2 run` appends
+        # "[ros2run]: Process exited with failure 1" after it -- taking the last
+        # line blindly reported that launcher noise instead of the summary, which
+        # is the one line the operator reads at the end of a session.
+        summary = hardening.session_check_summary(result.stdout or "")
         if result.returncode == 0:
             self.get_logger().info(f"session_check PASS: {summary}")
             return f"session_check: PASS ({summary})"

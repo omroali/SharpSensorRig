@@ -443,3 +443,35 @@ def bag_metadata_files(session_dir: str) -> list[str]:
         glob.glob(os.path.join(session_dir, "bag*", "metadata.yaml")),
         key=bag_sort_key,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Session-check output parsing
+# --------------------------------------------------------------------------- #
+#: Lines emitted by the `ros2 run` launcher rather than by the check itself.
+#: `ros2 run` appends one after the tool's own output, so taking the last stdout
+#: line blindly reports "[ros2run]: Process exited with failure 1" instead of the
+#: check's summary -- which is the one line an operator actually reads.
+_LAUNCHER_NOISE_PREFIXES = ("[ros2run]", "[ros2]", "[ERROR] [launch]")
+
+
+def session_check_summary(stdout: str) -> str:
+    """The check's own summary line, ignoring `ros2 run` launcher noise.
+
+    ``session_check`` prints per-topic failures followed by a summary such as
+    ``FAIL: 18/97 checks ok, 0 warnings (/path/session_report.yaml)``. When it is
+    invoked through ``ros2 run``, the launcher appends
+    ``[ros2run]: Process exited with failure 1`` after that, which is what a
+    naive "last line" parser returns. Prefer the last line that came from the
+    check itself.
+
+    Falls back to the last non-empty line if everything looks like noise, so a
+    future change to the launcher's output cannot leave the summary blank.
+    """
+    lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    meaningful = [
+        ln for ln in lines if not ln.startswith(_LAUNCHER_NOISE_PREFIXES)
+    ]
+    return (meaningful or lines)[-1]
