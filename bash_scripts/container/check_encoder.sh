@@ -11,9 +11,18 @@
 #   docker compose -f docker/docker-compose.yml run --rm sharp-sensor-rig \
 #       bash /home/ubuntu/bash_scripts/check_encoder.sh
 #
-# It runs exactly the probe from the 2026-10-01 remediation plan (B4):
+# It first aligns the container's driver userspace with the host kernel module
+# (see align_nvidia_driver_libs.sh -- a version skew there was the real cause of
+# the 2026-10-01 video loss), then runs the encoder probe from that plan:
 #
-#   ffmpeg -f lavfi -i nullsrc=s=64x64:d=0.1 -c:v <encoder> -f null -
+#   ffmpeg -f lavfi -i nullsrc=s=256x256:d=0.1 -c:v <encoder> -f null -
+#
+# NOTE the frame size: NVENC rejects frames below its minimum encode dimension
+# ("InitializeEncoder failed: invalid param (8): Frame Dimension less than the
+# minimum supported value"). The plan originally specified 64x64, which is below
+# that minimum -- so on a perfectly healthy GPU the probe reported FAIL and the
+# rig would have fallen back to CPU encoding for no reason. 256x256 is safely
+# above the limit and still instantaneous.
 #
 # for every encoder colour_video_recorder may use, then states which encoder it
 # will actually select for this rig's config (config/recording.yaml ->
@@ -27,8 +36,17 @@
 
 set -u -o pipefail
 
+# Align the container's driver userspace with the host kernel module BEFORE
+# probing. A version skew there makes every NVENC probe fail for a reason the
+# operator cannot fix from inside the container -- see the header of
+# align_nvidia_driver_libs.sh. Non-fatal if it cannot act.
+ALIGN_LIBS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/align_nvidia_driver_libs.sh"
+if [ -f "$ALIGN_LIBS" ]; then
+    bash "$ALIGN_LIBS"
+fi
+
 CONFIG="${SENSOR_CONFIG_DIR:-/home/ubuntu/config}/recording.yaml"
-PROBE_INPUT=(-f lavfi -i nullsrc=s=64x64:d=0.1)
+PROBE_INPUT=(-f lavfi -i nullsrc=s=256x256:d=0.1)
 PROBE_TIMEOUT=30
 
 probe() {

@@ -44,6 +44,22 @@ RUN apt-get update && \
 ENV CC=/usr/bin/gcc-12
 ENV CXX=/usr/bin/g++-12
 
+# Needed for the libfreenect2 CUDA build (-DENABLE_CUDA=ON) below.
+#
+# CAUTION (2026-10-06): this also pulls in Ubuntu's `libnvidia-compute-580`,
+# whose driver userspace (580.178.04 on noble) is NEWER than this host's
+# Pop!_OS driver (580.173.02). The container runtime injects the host's
+# libcuda/libnvidia-ml alongside the image's, but it does not overwrite the
+# .so.1 symlinks the image already created, so the loader picked the mismatched
+# userspace: NVML reported "Driver/library version mismatch", libcuda's
+# forward-compat path failed on consumer GeForce hardware
+# (CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE), and every colour stream recorded
+# 0 bytes. Reinstalling the host driver could not fix it.
+#
+# The runtime is corrected by bash_scripts/container/align_nvidia_driver_libs.sh,
+# which repoints those symlinks at the version matching the running kernel
+# module; it is called by tmux_launch.sh and check_encoder.sh. Do not remove it
+# as "redundant" without first making this layer stop shipping driver userspace.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     nvidia-cuda-toolkit && \

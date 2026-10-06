@@ -8,7 +8,7 @@
 
 recording_settings:
   output_root: "/home/ubuntu/data"
-  uuid: "191d6e5d-674c-4b67-ac3f-6ec9871d3772"
+  uuid: "6632b9d7-6156-4bbb-b024-0422ae306f9a"
 
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),

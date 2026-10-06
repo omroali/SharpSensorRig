@@ -114,9 +114,31 @@ def test_probe_command_matches_the_documented_pre_flight():
     cmd = ve.probe_command("h264_nvenc")
     joined = " ".join(cmd)
     assert cmd[0] == "ffmpeg"
-    assert "-f lavfi -i nullsrc=s=64x64:d=0.1" in joined
+    # 256x256, not 64x64: NVENC refuses frames below its minimum encode
+    # dimension, so a 64x64 probe reports FAIL on a healthy GPU and forces a
+    # needless fall back to the CPU encoder. See PROBE_INPUT in video_encoding.
+    assert "-f lavfi -i nullsrc=s=256x256:d=0.1" in joined
     assert "-c:v h264_nvenc" in joined
     assert cmd[-3:] == ["-f", "null", "-"]
+
+
+def test_probe_frame_is_large_enough_for_nvenc():
+    """Guard the frame size against a well-meaning 'make the probe cheaper' edit.
+
+    NVENC's minimum is far below 256, but the original 64x64 probe was under it.
+    Anything at or above 145 wide / 49 high is safe for H.264; assert a generous
+    floor so a future shrink cannot silently reintroduce the false negative.
+    """
+    import re
+
+    joined = " ".join(ve.PROBE_INPUT)
+    match = re.search(r"nullsrc=s=(\d+)x(\d+)", joined)
+    assert match, f"unexpected probe input: {joined}"
+    width, height = (int(g) for g in match.groups())
+    assert width >= 145 and height >= 145, (
+        f"probe frame {width}x{height} may be below NVENC's minimum "
+        "encode dimension, which would fail on a healthy GPU"
+    )
 
 
 def test_probe_encoder_reports_success():

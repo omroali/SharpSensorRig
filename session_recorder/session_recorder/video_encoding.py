@@ -61,9 +61,17 @@ SOFTWARE_FALLBACKS = {
 #: cannot keep up and would drop frames through the recorder's queue.
 SOFTWARE_PRESETS = {"libx264": "veryfast", "libx265": "veryfast"}
 
-#: Input side of the encoder probe. Matches the documented pre-flight command:
-#: ``ffmpeg -f lavfi -i nullsrc=s=64x64:d=0.1 -c:v <encoder> -f null -``
-PROBE_INPUT = ("-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1")
+#: Input side of the encoder probe. Matches the operator pre-flight command
+#: (``bash_scripts/container/check_encoder.sh``) as ``ffmpeg -f lavfi -i
+#: nullsrc=s=256x256:d=0.1 -c:v <encoder> -f null -``.
+#:
+#: The frame size must stay above NVENC's minimum encode dimension. A 64x64
+#: probe -- what the 2026-10-01 remediation plan originally specified -- makes
+#: NVENC fail with "InitializeEncoder failed: invalid param (8): Frame Dimension
+#: less than the minimum supported value" even when the GPU is perfectly
+#: healthy, so the recorder would log a spurious NVENC failure and fall back to
+#: the CPU encoder for no reason. 256x256 is comfortably clear of the limit.
+PROBE_INPUT = ("-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1")
 
 #: A dead NVENC usually fails in well under a second; the timeout only exists so
 #: a wedged probe cannot block rig startup or the start of a recording.

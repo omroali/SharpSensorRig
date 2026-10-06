@@ -28,16 +28,47 @@ Proves success: the last line is `RESULT: HARDWARE OK` (NVENC works) or
 still recorded, expect higher CPU and larger files). Either is usable;
 `RESULT: FAIL` means every `.mp4` would be 0 bytes — do not start a session.
 
-The host GPU stack is currently broken (`nvidia-smi` → NVML/driver/library
-version mismatch, NVML 580.178), so **software fallback is expected** until the
-driver is realigned. Realigning it needs `sudo` and a reboot:
+#### RESOLVED 2026-10-06 — the NVENC failure was NOT the host driver
 
-```bash
-# host, needs sudo and a reboot — not done from this repo
-sudo apt install --reinstall nvidia-driver-<version>   # match `modinfo nvidia | head`
-sudo reboot
-nvidia-smi                                             # must list the GPU
+Reinstalling the host driver and rebooting did not help, because the fault was
+never on the host. Two separate bugs were found and fixed:
+
+**1. The image ships a newer driver userspace than the host kernel module.**
+`docker/Dockerfile` installs `nvidia-cuda-toolkit` (for the libfreenect2 CUDA
+build), which pulls in Ubuntu noble's `libnvidia-compute-580` = **580.178.04**,
+while this host's Pop!_OS driver is **580.173.02**. The container runtime
+injects the host's libs *alongside* the image's but does not overwrite the
+`.so.1` symlinks the image already created, so the loader used the mismatched
+one:
+
 ```
+libcuda.so.1      -> libcuda.so.580.178.04   (image — WRONG)
+libcuda.so.580.173.02                        (host — correct, unused)
+```
+
+That is why NVML said "Driver/library version mismatch" and why libcuda failed
+with `CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE`: CUDA forward compatibility is
+not supported on consumer GeForce hardware, and this is an RTX 3080.
+
+Fixed by `bash_scripts/container/align_nvidia_driver_libs.sh`, which reads the
+running kernel module version from `/proc/driver/nvidia/version` and repoints
+each driver `.so.1` symlink at the matching injected library. It runs
+automatically from `tmux_launch.sh` and from `check_encoder.sh`, is idempotent,
+and is non-fatal (so the software fallback still works without a GPU). No image
+rebuild is required, and it self-corrects if the host driver is updated again.
+
+**2. The pre-flight probe used a frame size NVENC rejects.**
+The 2026-10-01 plan specified `nullsrc=s=64x64`. NVENC's minimum encode
+dimension is larger than that, so on a *perfectly healthy* GPU the probe failed
+with `InitializeEncoder failed: invalid param (8): Frame Dimension less than the
+minimum supported value` — and the rig would have fallen back to CPU encoding
+for no reason, with the operator told NVENC was broken. Probe frame is now
+**256x256** in both `check_encoder.sh` and `video_encoding.PROBE_INPUT`, with a
+regression test in `test_video_encoding.py`.
+
+**So the expected result is now `RESULT: HARDWARE OK`, not a software
+fallback.** If you still see a fallback, run `nvidia-smi` on the host first — it
+must list the GPU.
 
 ### 0.2 What the recording should show from now on
 

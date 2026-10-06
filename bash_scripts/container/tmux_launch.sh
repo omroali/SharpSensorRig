@@ -16,6 +16,18 @@ tmux has-session -t "$SESSION" 2>/dev/null && {
     exit 0
 }
 
+# Align the container's NVIDIA driver userspace with the host kernel module
+# before anything starts. The image ships Ubuntu's libnvidia-compute (a newer
+# userspace than this host's driver), and the container runtime does not
+# overwrite the image's .so.1 symlinks -- so without this, NVENC cannot
+# initialise and every colour stream records 0 bytes. See
+# align_nvidia_driver_libs.sh and the 2026-10-01 incident notes.
+BASH_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$BASH_SCRIPTS_DIR/align_nvidia_driver_libs.sh" ]; then
+    bash "$BASH_SCRIPTS_DIR/align_nvidia_driver_libs.sh"
+    echo
+fi
+
 # Kinect
 tmux new-session -d -s "$SESSION" -n "kinect" bash -i
 sleep 2  # let .bashrc finish before typing
