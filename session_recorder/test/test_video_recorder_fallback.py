@@ -21,6 +21,8 @@ import sys
 import time
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -180,3 +182,65 @@ def test_a_zero_byte_video_is_recorded_as_a_loss(tmp_path):
 def test_stop_is_safe_when_ffmpeg_was_never_started(tmp_path):
     recorder, _, _ = _recorder(tmp_path, {"h264_nvenc": (0, "")})
     recorder.stop()  # no frames arrived; must not raise on a None _proc
+
+
+# --- mux-rate calibration (2026-10-08: startup window baked in for the whole
+# --- session, so video and its timestamp CSV drifted apart) ------------------
+
+def _ramp_timestamps(nominal_fps=30.0, startup_gaps_s=(), total_s=3.5):
+    """Timestamps for a stream that stalls at the start then runs at nominal.
+
+    Reproduces what the rig's sensors actually do: the median inter-frame gap is
+    nominal from the very first frame, but the opening seconds contain multi-frame
+    gaps while the capture pipeline primes. Averaging over that window (what the
+    recorder used to do, over its first 2 s) under-reports the rate, and the
+    recorder then muxed the entire session at that wrong rate.
+    """
+    step_ns = int(1e9 / nominal_fps)
+    stamps = [0]
+    for gap_s in startup_gaps_s:
+        stamps.append(stamps[-1] + step_ns + int(gap_s * 1e9))
+    while stamps[-1] < int(total_s * 1e9):
+        stamps.append(stamps[-1] + step_ns)
+    return stamps
+
+
+def test_sustained_fps_ignores_startup_stalls():
+    """The measurement must reflect the settled rate, not the ramp-up."""
+    stamps = _ramp_timestamps(startup_gaps_s=(0.035, 0.070, 0.098, 0.034, 0.067))
+    naive = cvi.measured_fps(stamps)
+    settled = cvi.sustained_fps(stamps, fallback_fps=30.0)
+    assert naive < 29.0, f"fixture should look slow to the old measurement: {naive}"
+    assert settled == pytest.approx(30.0, abs=0.5), (
+        f"settled rate should recover ~30 fps, got {settled} (naive was {naive})"
+    )
+
+
+def test_sustained_fps_reports_a_genuinely_slow_stream():
+    """A stream that is really slow must still be measured as slow.
+
+    This is the behaviour the calibration exists for: a Kinect starved of USB
+    bandwidth delivers ~24 fps throughout, and the video must not be stamped as
+    if it arrived at 30.
+    """
+    stamps = _ramp_timestamps(nominal_fps=24.0, total_s=5.0)
+    assert cvi.sustained_fps(stamps, fallback_fps=30.0) == pytest.approx(24.0, abs=0.6)
+
+
+def test_sustained_fps_falls_back_when_the_window_is_too_short():
+    """Fewer than two settled frames -> the caller's fallback, never a crash."""
+    assert cvi.sustained_fps([], fallback_fps=30.0) == 30.0
+    assert cvi.sustained_fps([0], fallback_fps=30.0) == 30.0
+    # Two frames, both inside the settling period.
+    assert cvi.sustained_fps([0, 33_000_000], fallback_fps=30.0) == 30.0
+
+
+def test_sustained_fps_never_returns_zero_for_a_usable_window():
+    stamps = _ramp_timestamps(total_s=6.0)
+    assert cvi.sustained_fps(stamps, fallback_fps=30.0) > 0
+
+
+def test_settle_window_is_shorter_than_the_calibration_wait():
+    """The settle period must fit inside the window calibration can produce,
+    otherwise every calibration would fall back and the feature would be dead."""
+    assert cvi.CALIBRATION_SETTLE_S < cvi.CALIBRATION_MAX_WAIT_S

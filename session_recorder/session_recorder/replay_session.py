@@ -50,6 +50,7 @@ import time
 
 import yaml
 
+from session_recorder import hardening
 from session_recorder.tf_overrides import (
     load_overrides,
     merge_overrides,
@@ -118,7 +119,7 @@ def _strip_compressed(topic: str) -> str:
 def discover_videos(session_dir: str, expected: dict) -> list[dict]:
     """Find colour streams and the topic to republish each one on.
 
-    Prefers the session manifest (exact topic mapping). Any leftover ``*.mp4``
+    Prefers the session manifest (exact topic mapping). Any leftover video
     without a manifest entry is still included, published on ``/<stem>``.
     """
     videos_dir = os.path.join(session_dir, "videos")
@@ -133,7 +134,7 @@ def discover_videos(session_dir: str, expected: dict) -> list[dict]:
         if not topic:
             continue
         stem = topic_to_stem(topic)
-        video = os.path.join(videos_dir, f"{stem}.mp4")
+        video = os.path.join(videos_dir, f"{stem}{hardening.VIDEO_EXT}")
         csv_path = os.path.join(videos_dir, f"{stem}.csv")
         if not (os.path.isfile(video) and os.path.isfile(csv_path)):
             continue
@@ -146,7 +147,7 @@ def discover_videos(session_dir: str, expected: dict) -> list[dict]:
         })
 
     # Fallback: videos with no manifest entry (e.g. manifest missing).
-    for video in sorted(glob.glob(os.path.join(videos_dir, "*.mp4"))):
+    for video in sorted(glob.glob(os.path.join(videos_dir, f"*{hardening.VIDEO_EXT}"))):
         stem = os.path.splitext(os.path.basename(video))[0]
         if stem in seen:
             continue

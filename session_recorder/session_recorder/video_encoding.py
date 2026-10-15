@@ -112,6 +112,30 @@ def build_encoder_args(encoder: str, crf: int, mux_fps: float) -> list[str]:
     return args
 
 
+#: Matroska cluster bound. Caps how much video a hard kill can cost, and keeps
+#: the cue index fine-grained enough for the per-frame seeking the session
+#: player and image publisher both do. 1 s matches KEYFRAME_INTERVAL_S.
+CLUSTER_TIME_LIMIT_MS = 1000
+
+
+def build_muxer_args(container: str) -> list[str]:
+    """Container-specific ffmpeg output flags for ``container`` (``mkv``/``mp4``).
+
+    ``-movflags +faststart`` is MP4-only and must not be passed for Matroska.
+    It is also actively harmful here: ffmpeg's own muxer help describes it as
+    "Run a second pass to put the index (moov atom) at the beginning of the
+    file", so it rewrites the whole file at shutdown. That widens the window in
+    which a kill destroys the recording, which is the exact failure this change
+    exists to remove.
+    """
+    kind = str(container or "").lower().lstrip(".")
+    if kind in ("mkv", "matroska", "webm"):
+        return ["-cluster_time_limit", str(CLUSTER_TIME_LIMIT_MS)]
+    if kind in ("mp4", "mov", "m4v"):
+        return ["-movflags", "+faststart"]
+    return []
+
+
 def software_fallback_for(encoder: str) -> str | None:
     """CPU encoder to use when ``encoder`` cannot initialise (None if unknown)."""
     return SOFTWARE_FALLBACKS.get(str(encoder or ""))

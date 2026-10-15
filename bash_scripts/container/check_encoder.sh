@@ -32,7 +32,7 @@
 # Exit status:
 #   0 = at least one encoder can record video (a software fallback still
 #       records video; read the RESULT line before starting a session)
-#   1 = NO encoder works: every .mp4 would be 0 bytes. Do not start a session.
+#   1 = NO encoder works: every video would be 0 bytes. Do not start a session.
 
 set -u -o pipefail
 
@@ -158,7 +158,7 @@ other_encoder="$(effective_for "$requested" || true)"
 
 echo
 if [ -z "$colour_encoder" ] && [ -z "$other_encoder" ]; then
-    echo "RESULT: FAIL - no working encoder. Every .mp4 would be 0 bytes."
+    echo "RESULT: FAIL - no working encoder. Every video would be 0 bytes."
     echo "        Fix the host GPU stack or install a build of ffmpeg with libx264/libx265."
     exit 1
 fi

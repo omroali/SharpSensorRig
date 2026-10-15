@@ -221,7 +221,7 @@ def test_watchdog_alarms_on_a_zero_byte_video(tmp_path):
     manager = _manager(module)
     session = tmp_path / "session_20261006_090000"
     (session / "videos").mkdir(parents=True)
-    zero_byte = session / "videos" / "cam_color_image_raw.mp4"
+    zero_byte = session / "videos" / "cam_color_image_raw.mkv"
     zero_byte.write_bytes(b"")
     manager._session_dir = str(session)
     manager._session_start = time.time() - 30

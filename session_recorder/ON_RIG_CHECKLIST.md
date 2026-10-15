@@ -26,7 +26,7 @@ docker compose -f docker/docker-compose.yml run --rm sharp-sensor-rig \
 Proves success: the last line is `RESULT: HARDWARE OK` (NVENC works) or
 `RESULT: SOFTWARE FALLBACK` with `libx264`/`libx265` (CPU encoding — video is
 still recorded, expect higher CPU and larger files). Either is usable;
-`RESULT: FAIL` means every `.mp4` would be 0 bytes — do not start a session.
+`RESULT: FAIL` means every video would be 0 bytes — do not start a session.
 
 #### RESOLVED 2026-10-06 — the NVENC failure was NOT the host driver
 

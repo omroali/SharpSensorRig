@@ -6,8 +6,8 @@ manifest that recording_manager wrote at start time:
 
   - every expected bag topic is present in the bag with a healthy rate
   - regex-expected topics (vicon) matched at least one topic, each healthy
-  - every expected video has an .mp4 and a timestamp CSV whose frame rate
-    and time span cover the session (catches encoders that died mid-take)
+  - every expected video has a Matroska file and a timestamp CSV whose frame
+    rate and time span cover the session (catches encoders that died mid-take)
   - rosbag transport-layer message loss is surfaced
 
 Writes <session>/session_report.yaml, prints one PASS/FAIL summary line
@@ -124,13 +124,13 @@ def _check_video(
     expected_hz: float | None, min_rate_factor: float,
 ):
     stem = topic_to_filename(topic)
-    mp4 = os.path.join(videos_dir, f"{stem}.mp4")
+    video = os.path.join(videos_dir, f"{stem}{hardening.VIDEO_EXT}")
     csv_path = os.path.join(videos_dir, f"{stem}.csv")
 
-    if not os.path.isfile(mp4) or os.path.getsize(mp4) == 0:
+    if not os.path.isfile(video) or os.path.getsize(video) == 0:
         checks.append({
             "topic": topic, "sink": "video", "status": "fail",
-            "detail": f"missing or empty video: {mp4}",
+            "detail": f"missing or empty video: {video}",
         })
         return
     if not os.path.isfile(csv_path):

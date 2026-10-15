@@ -37,10 +37,10 @@ def _write_session(tmp_path):
         "kinect2_1_qhd_image_color_rect_compressed",
         "realsense_D555_419222301842_color_image_raw_compressed",
     ):
-        (videos / f"{stem}.mp4").write_bytes(b"")
+        (videos / f"{stem}.mkv").write_bytes(b"")
         (videos / f"{stem}.csv").write_text("frame_idx,ros_timestamp_ns\n0,1\n")
     # A video with no manifest entry, still discovered via fallback.
-    (videos / "orphan_stream.mp4").write_bytes(b"")
+    (videos / "orphan_stream.mkv").write_bytes(b"")
     (videos / "orphan_stream.csv").write_text("frame_idx,ros_timestamp_ns\n")
 
     def meta(topic, type_):
@@ -93,7 +93,7 @@ def test_discover_videos_maps_manifest_topics_and_strips_compressed(tmp_path):
     assert "/orphan_stream" in by_publish
     assert len(specs) == 3
     kinect = by_publish["/kinect2_1/qhd/image_color_rect"]
-    assert kinect["video"].endswith("kinect2_1_qhd_image_color_rect_compressed.mp4")
+    assert kinect["video"].endswith("kinect2_1_qhd_image_color_rect_compressed.mkv")
     assert kinect["csv"].endswith("kinect2_1_qhd_image_color_rect_compressed.csv")
 
 

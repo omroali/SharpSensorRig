@@ -128,11 +128,16 @@ def test_no_metadata_at_all_fails_the_check(tmp_path):
 
 
 def test_zero_byte_video_is_a_hard_failure(tmp_path):
-    """The exact 2026-10-01 signature: four 0-byte mp4 files."""
+    """The exact 2026-10-01 signature: four 0-byte video files.
+
+    The file must carry the container extension the recorder writes, or the
+    check fails for the wrong reason (absent rather than empty) and silently
+    stops covering the incident it exists for.
+    """
     session = _session(
         tmp_path,
         [{"topic": "/cam/color/image_raw", "expected_hz": 15.0, "sink": "video"}],
-        videos={"cam_color_image_raw.mp4": b""},
+        videos={"cam_color_image_raw.mkv": b""},
     )
     assert session_check.run_check(str(session)) == 1
     video = _check(_report(session), "/cam/color/image_raw")

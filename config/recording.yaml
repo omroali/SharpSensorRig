@@ -8,7 +8,7 @@
 
 recording_settings:
   output_root: "/home/ubuntu/data"
-  uuid: "6632b9d7-6156-4bbb-b024-0422ae306f9a"
+  uuid: "d93e1a5f-4d43-4524-9e8e-4a1312709469"
 
   # ───────────────────────── Video (colour/IR streams) ─────────────────────
   # Encoder: libx265 (CPU), hevc_nvenc (Nvidia GPU), hevc_qsv (Intel),
@@ -33,13 +33,25 @@ recording_settings:
   #   18 visually lossless · 22 high · 28 good · 35 low
   video_crf: 18
 
-  # Frame rate written to the .mp4 container; match the sensor rate.
+  # Frame rate written to the video container; match the sensor rate.
+  # The rate is measured over the *settled* part of the opening seconds (sensors
+  # ramp up), falling back to this value; it is never raised above it.
   video_fps: 30.0
 
   # Seconds to wait after /start_recording before treating a missing or
-  # 0-byte .mp4 as a failure and printing it on the recording console.
+  # 0-byte video file as a failure and printing it on the recording console.
   # (Recorders hold the first 2-5 s of frames back to measure the real fps.)
   video_startup_grace_s: 20
+
+  # ───────────────────────── Video container ───────────────────────────────
+  # Colour video is written as Matroska (.mkv), not MP4. MP4 keeps its whole
+  # sample table in one moov atom that is written only when ffmpeg finalises, so
+  # a hard kill (SIGKILL, host crash, container teardown) leaves the frames on
+  # disk with no index and the file unopenable. Measured on this rig by killing
+  # a live recording: the MP4 recovered 0 frames, the same encode written as MKV
+  # recovered all of them. Verified before switching that the session player's
+  # per-frame seeking and the RViz image publisher both handle MKV unchanged.
+  # The extension lives in one place: session_recorder/hardening.py VIDEO_EXT.
 
   # ───────────────────────── Rosbag (depth/metadata) ───────────────────────
   # Storage format: mcap (recommended) or sqlite3.

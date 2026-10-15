@@ -52,25 +52,25 @@ def test_bag_split_args_truncate_fractional_values():
 def test_video_startup_problems_names_missing_and_empty_files(tmp_path):
     videos = tmp_path / "videos"
     videos.mkdir()
-    (videos / "cam_color_image_raw.mp4").write_bytes(b"")  # 0 bytes: the incident
-    (videos / "cam_ir_image.mp4").write_bytes(b"\x00" * 128)  # healthy
+    (videos / "cam_color_image_raw.mkv").write_bytes(b"")  # 0 bytes: the incident
+    (videos / "cam_ir_image.mkv").write_bytes(b"\x00" * 128)  # healthy
 
     problems = hardening.video_startup_problems(
         str(tmp_path), ["/cam/color/image_raw", "/cam/ir/image", "/cam/other"]
     )
     assert len(problems) == 2
-    assert any("cam_color_image_raw.mp4" in p and "0 bytes" in p for p in problems)
+    assert any("cam_color_image_raw.mkv" in p and "0 bytes" in p for p in problems)
     assert any("no video file yet" in p for p in problems)
-    assert not any("cam_ir_image.mp4" in p for p in problems)
+    assert not any("cam_ir_image.mkv" in p for p in problems)
 
 
 def test_video_file_sizes_use_minus_one_for_uncreated_files(tmp_path):
     videos = tmp_path / "videos"
     videos.mkdir()
-    (videos / "a.mp4").write_bytes(b"x" * 10)
+    (videos / "a.mkv").write_bytes(b"x" * 10)
     sizes = hardening.video_file_sizes(str(tmp_path), ["/a", "/b"])
     assert sizes == {"/a": 10, "/b": -1}
-    assert hardening.total_size([str(videos / "a.mp4"), str(videos / "b.mp4")]) == 10
+    assert hardening.total_size([str(videos / "a.mkv"), str(videos / "b.mkv")]) == 10
 
 
 def test_bag_file_sizes_are_relative_to_the_session(tmp_path):

@@ -61,7 +61,7 @@ container).
 ```
 /media/oali/RECORDING_DATA/<uuid>/session_<timestamp>/
 ├── videos/
-│   ├── <topic>.mp4          # H.265 video per colour/IR stream
+│   ├── <topic>.mkv          # H.265 video per colour/IR stream
 │   └── <topic>.csv          # per-frame timestamps
 └── bag/
     └── bag_0.mcap           # zstd-compressed: depth, camera_info, velodyne, vicon, TF

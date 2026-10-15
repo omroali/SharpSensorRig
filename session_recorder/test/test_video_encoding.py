@@ -74,6 +74,52 @@ def test_quality_flags_per_encoder():
     assert ve.quality_flags("libx265", 1) == ["-crf", "1"]
 
 
+# --- container / muxer args (MKV switch, 2026-10-08 crash test) -------------
+
+def test_mkv_muxer_args_never_request_a_faststart_second_pass():
+    """Regression: +faststart is MP4-only and rewrites the file at shutdown.
+
+    ffmpeg's mp4 muxer documents it as "Run a second pass to put the index
+    (moov atom) at the beginning of the file". On Matroska it is invalid, and
+    on MP4 it widens the window in which a hard kill destroys the recording --
+    the failure the MKV switch removes.
+    """
+    assert ve.build_muxer_args("mkv") == ["-cluster_time_limit", "1000"]
+    assert "+faststart" not in ve.build_muxer_args("mkv")
+    assert "faststart" not in " ".join(ve.build_muxer_args("mkv"))
+
+
+def test_mkv_muxer_args_bound_cluster_size():
+    """Bounded clusters cap what a hard kill can cost and keep cues fine-grained."""
+    args = ve.build_muxer_args("mkv")
+    assert "-cluster_time_limit" in args
+    assert int(args[args.index("-cluster_time_limit") + 1]) <= 2000
+
+
+def test_mp4_muxer_args_keep_the_old_behaviour():
+    """MP4 is still supported (post-session remux); it keeps faststart."""
+    assert ve.build_muxer_args("mp4") == ["-movflags", "+faststart"]
+
+
+@pytest.mark.parametrize("container", ["mkv", ".mkv", "MKV", "matroska", "webm"])
+def test_mkv_muxer_args_accept_extensions_and_case(container):
+    assert ve.build_muxer_args(container) == ["-cluster_time_limit", "1000"]
+
+
+def test_unknown_container_gets_no_muxer_flags():
+    assert ve.build_muxer_args("avi") == []
+    assert ve.build_muxer_args("") == []
+    assert ve.build_muxer_args(None) == []
+
+
+def test_video_ext_is_matroska_and_lives_in_one_place():
+    """One source of truth: hardening.VIDEO_EXT drives writers and readers."""
+    from session_recorder import hardening
+
+    assert hardening.VIDEO_EXT == ".mkv"
+    assert hardening.video_path("/s", "/cam/color/image_raw").endswith(".mkv")
+
+
 # --- software fallback (2026-10-01: NVENC failed, every video was 0 bytes) --
 
 @pytest.mark.parametrize("encoder", ["libx264", "libx265"])

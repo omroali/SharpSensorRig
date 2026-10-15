@@ -61,6 +61,27 @@ ENCODER_STATUS_NAME = "encoder_status.json"
 STREAM_FAILURES_NAME = "stream_failures.json"
 VIDEOS_DIR_NAME = "videos"
 
+#: Container extension for recorded colour video -- the single source of truth.
+#:
+#: Matroska, not MP4. MP4 keeps its entire sample table in one ``moov`` atom
+#: written only at finalisation, so a hard kill (SIGKILL, host crash, container
+#: teardown) leaves the frames on disk with no index: the file reports ``moov
+#: atom not found`` and no player will open it. Matroska writes Segment/Cluster
+#: elements incrementally, so a truncated file still decodes to the last
+#: flushed cluster.
+#:
+#: Measured on this rig by killing a live 960x540 recording mid-stream:
+#: MP4 recovered 0 frames, MKV recovered 129 of the 200 frames fed. On a clean
+#: stop (or SIGTERM/SIGINT) both recover all 200 -- the difference is entirely
+#: in the hard-kill case. Note this is recovery, not guarantee: ffmpeg buffers
+#: the open cluster and the kernel buffers writes, so even MKV loses whatever
+#: had not reached a flushed cluster.
+#:
+#: Consumers (session_check, replay_session, the RViz image publisher, the
+#: session player) all read this through :func:`video_path`; ffmpeg's MKV muxer
+#: args live in :func:`video_encoding.build_muxer_args`.
+VIDEO_EXT = ".mkv"
+
 
 # --------------------------------------------------------------------------- #
 # Bag splitting
@@ -95,7 +116,7 @@ def videos_dir(session_dir: str) -> str:
 
 
 def video_path(session_dir: str, topic: str) -> str:
-    return os.path.join(videos_dir(session_dir), f"{topic_to_filename(topic)}.mp4")
+    return os.path.join(videos_dir(session_dir), f"{topic_to_filename(topic)}{VIDEO_EXT}")
 
 
 def encoder_status_path(session_dir: str) -> str:

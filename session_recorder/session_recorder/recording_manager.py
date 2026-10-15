@@ -7,7 +7,7 @@ H.265 videos, and depth/IR/camera_info/velodyne/vicon/TF into one rosbag.
 Each take lands in a single session directory:
 
   <output_root>/<uuid>/session_<stamp>/
-    videos/*.mp4 + per-stream timestamp CSVs
+    videos/*.mkv + per-stream timestamp CSVs
     bag/         one mcap with every non-video topic (split every
                  bag_max_duration_s / bag_max_size_mb - see below)
 

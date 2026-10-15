@@ -8,9 +8,10 @@ those files every scrub seeks back to frame 0 — the further into the session y
 jump, the longer it takes ("the scrubber gets slower and slower"). Playback is
 unaffected because it reads sequentially.
 
-This rewrites each ``<session>/videos/*.mp4`` in place with a fresh keyframe
-every second, preserving the frame count so the existing ``*.csv`` timestamp
-tables stay valid. Files that already have periodic keyframes are skipped.
+This rewrites each ``<session>/videos/*`` recording for the container the
+recorders write (``hardening.VIDEO_EXT``) in place with a fresh keyframe every
+second, preserving the frame count so the existing ``*.csv`` timestamp tables
+stay valid. Files that already have periodic keyframes are skipped.
 
 Usage:
   python3 repair_video_keyframes.py <session_dir> [--encoder auto|h264_nvenc|libx264]
@@ -31,7 +32,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from session_recorder.video_encoding import build_encoder_args, keyframe_interval  # noqa: E402
+from session_recorder import hardening  # noqa: E402
+from session_recorder.video_encoding import (  # noqa: E402
+    build_encoder_args,
+    build_muxer_args,
+    keyframe_interval,
+)
 
 
 def _probe(path: str, entries: str, extra: list[str] | None = None) -> str:
@@ -69,7 +75,8 @@ def keyframe_count(path: str) -> int:
 def _encode(src: str, dst: str, encoder: str, crf: int, fps: float) -> bool:
     cmd = ["ffmpeg", "-v", "error", "-y", "-i", src]
     cmd += build_encoder_args(encoder, crf, fps)
-    cmd += ["-fps_mode", "passthrough", "-movflags", "+faststart", dst]
+    cmd += ["-fps_mode", "passthrough"]
+    cmd += build_muxer_args(os.path.splitext(dst)[1])
     return subprocess.run(cmd).returncode == 0
 
 
@@ -91,7 +98,7 @@ def repair(path: str, args) -> bool:
     if args.dry_run:
         return False
 
-    tmp = path + ".keyfix.tmp.mp4"
+    tmp = path + f".keyfix.tmp{hardening.VIDEO_EXT}"
     encoders = [args.encoder] if args.encoder != "auto" else ["h264_nvenc", "libx264"]
     try:
         for encoder in encoders:
@@ -138,9 +145,9 @@ def main(argv=None) -> int:
         print("ERROR: ffmpeg/ffprobe not found on PATH", file=sys.stderr)
         return 2
 
-    videos = sorted(glob.glob(os.path.join(args.session_dir, "videos", "*.mp4")))
+    videos = sorted(glob.glob(os.path.join(args.session_dir, "videos", f"*{hardening.VIDEO_EXT}")))
     if not videos:
-        print(f"ERROR: no videos/*.mp4 under {args.session_dir}", file=sys.stderr)
+        print(f"ERROR: no videos/*{hardening.VIDEO_EXT} under {args.session_dir}", file=sys.stderr)
         return 2
 
     print(f"{len(videos)} video(s) in {args.session_dir}/videos")

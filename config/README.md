@@ -26,7 +26,7 @@ Added after the 2026-10-01 session lost a 72-minute bag and four 0-byte videos.
 | `bag_max_size_mb` | `1024` | additional size cap per split (`0` = unlimited) |
 | `video_software_fallback` | `true` | fall back to `libx264`/`libx265` when the hardware encoder will not initialise |
 | `video_encoder_probe` | `true` | probe the encoder at rig start with the pre-flight encode and print the verdict |
-| `video_startup_grace_s` | `20` | wait before calling a missing/0-byte `.mp4` a failure on the console |
+| `video_startup_grace_s` | `20` | wait before calling a missing/0-byte video file a failure on the console |
 | `watchdog.enabled` / `interval_s` | `true` / `5` | poll the recorder children for the whole session, write `recorder_heartbeat.json` |
 | `watchdog.restart_bag` | `true` | restart a dead bag recorder into a fresh `bag_N/` (previous splits are kept) |
 | `stop_grace_s` | `30` | drain window for a graceful stop (must stay below compose `stop_grace_period: 60s`) |

@@ -21,7 +21,8 @@ This recorder now:
   ``<stem>.ffmpeg.log.attempt1``;
 * records every permanent stream loss in ``videos/stream_failures.json`` so the
   manager can turn it into a console alarm;
-* stops cleanly on SIGTERM/SIGHUP, finalising the mp4 instead of truncating it.
+* stops cleanly on SIGTERM/SIGHUP, finalising the Matroska file instead of
+  leaving its last cluster truncated.
 """
 
 import csv
@@ -41,6 +42,7 @@ from session_recorder import hardening
 from session_recorder.video_encoding import (
     EncoderResolver,
     build_encoder_args,
+    build_muxer_args,
     keyframe_interval,
     software_fallback_for,
 )
@@ -62,12 +64,47 @@ CALIBRATION_MIN_FRAMES = 10
 CALIBRATION_WINDOW_S = 2.0
 CALIBRATION_MAX_WAIT_S = 5.0
 
+#: Sensors ramp up: a Kinect/QHD stream is slow for the first second or two
+#: while its pipeline primes, then settles at its real rate. Measuring the
+#: *startup* window therefore under-reports it permanently.
+#:
+#: Measured on this rig (session_20261008_123838, recovered frame timestamps):
+#: the Kinect calibrated at 24.11 fps and muxed the whole session at that rate
+#: while genuinely delivering 30.06 fps, so playback ran ~20% slow and the
+#: video drifted out of step with its own timestamp CSV - which is what every
+#: downstream join between frames and CSV rows relies on. The RealSense pair
+#: calibrated at 13.98/8.23 fps against a true 14.99/15.00 fps.
+#:
+#: Frames before SETTLE_S are therefore excluded from the measurement.
+CALIBRATION_SETTLE_S = 3.0
+
 
 def measured_fps(timestamps_ns: list[int]) -> float:
+    """Mean rate across ``timestamps_ns`` (0.0 if it has fewer than two)."""
     if len(timestamps_ns) < 2:
         return 0.0
     span_s = (timestamps_ns[-1] - timestamps_ns[0]) / 1e9
     return (len(timestamps_ns) - 1) / span_s if span_s > 0 else 0.0
+
+
+def sustained_fps(
+    timestamps_ns: list[int],
+    settle_s: float = CALIBRATION_SETTLE_S,
+    fallback_fps: float = 0.0,
+) -> float:
+    """Frame rate over the *settled* part of a calibration window.
+
+    Returns ``fallback_fps`` when the window is too short to skip the settling
+    period and still have two frames left to measure between.
+    """
+    if len(timestamps_ns) < 2:
+        return fallback_fps
+    start_ns = timestamps_ns[0] + int(settle_s * 1e9)
+    settled = [ts for ts in timestamps_ns if ts >= start_ns]
+    if len(settled) < 2:
+        return fallback_fps
+    rate = measured_fps(settled)
+    return rate if rate > 0 else fallback_fps
 
 
 def calibration_done(timestamps_ns: list[int]) -> bool:
@@ -174,7 +211,7 @@ class StreamRecorder:
         self._retried = False
 
         stem = topic_to_filename(topic)
-        self._video_path = os.path.join(output_dir, f"{stem}.mp4")
+        self._video_path = os.path.join(output_dir, f"{stem}{hardening.VIDEO_EXT}")
         self._csv_path = os.path.join(output_dir, f"{stem}.csv")
         self._log_path = os.path.join(output_dir, f"{stem}.ffmpeg.log")
         self._crf = crf
@@ -280,8 +317,7 @@ class StreamRecorder:
             "-i",
             "pipe:0",
             *encoder_args,
-            "-movflags",
-            "+faststart",
+            *build_muxer_args(hardening.VIDEO_EXT),
             self._video_path,
         ]
 
@@ -305,9 +341,10 @@ class StreamRecorder:
     def _close_ffmpeg(self, wait_s: float = 30.0):
         """Close the current ffmpeg; safe to call on an already-dead process.
 
-        ``wait_s`` matters: on a stop ffmpeg still has to flush and, because of
-        ``-movflags +faststart``, rewrite the moov atom — killing it early would
-        leave exactly the truncated, unplayable mp4 this incident was about.
+        ``wait_s`` matters: on a stop ffmpeg still has to flush its encoder
+        pipeline and close the open Matroska cluster. That finalisation is much
+        cheaper than the MP4 ``+faststart`` second pass it replaced, but killing
+        ffmpeg early still costs the frames held in its buffers.
         """
         proc, self._proc = self._proc, None
         if proc is not None:
@@ -349,9 +386,9 @@ class StreamRecorder:
     def _retry_with_software_encoder(self, frame) -> bool:
         """One software-encoder restart, only if nothing was written yet.
 
-        Restarting a stream that has already produced frames would truncate the
-        mp4 (``ffmpeg -y``), so this refuses to do that: mid-session death is
-        reported as a loss instead.
+        Restarting a stream that has already produced frames would discard the
+        existing output (``ffmpeg -y``), so this refuses to do that:
+        mid-session death is reported as a loss instead.
         """
         with self._lock:
             if (
@@ -405,7 +442,9 @@ class StreamRecorder:
                 if not calibration_done([f[1] for f in self._calib_frames]):
                     return
                 self._calibrating = False
-                mux_fps = measured_fps([f[1] for f in self._calib_frames])
+                mux_fps = sustained_fps(
+                    [f[1] for f in self._calib_frames], fallback_fps=self._fps
+                )
                 if mux_fps <= 0:
                     mux_fps = self._fps
                 else:
@@ -413,8 +452,9 @@ class StreamRecorder:
                     if mux_fps < self._fps:
                         self.logger.warn(
                             f"[{self.topic}] Configured {self._fps}fps but only "
-                            f"measured {mux_fps}fps arriving; muxing at the "
-                            "measured rate to keep playback speed correct."
+                            f"{mux_fps}fps sustained after the first "
+                            f"{CALIBRATION_SETTLE_S:.0f}s; muxing at that rate to "
+                            "keep playback speed correct."
                         )
                 pixel_fmt = self._pixel_fmt_from_encoding(msg.encoding)
                 self._start(msg.width, msg.height, pixel_fmt, mux_fps)
@@ -538,7 +578,7 @@ class CompressedStreamRecorder:
         self._retried = False
 
         stem = topic_to_filename(topic)
-        self._video_path = os.path.join(output_dir, f"{stem}.mp4")
+        self._video_path = os.path.join(output_dir, f"{stem}{hardening.VIDEO_EXT}")
         self._csv_path = os.path.join(output_dir, f"{stem}.csv")
         self._log_path = os.path.join(output_dir, f"{stem}.ffmpeg.log")
         self._crf = crf
@@ -578,8 +618,7 @@ class CompressedStreamRecorder:
             "-i",
             "pipe:0",
             *encoder_args,
-            "-movflags",
-            "+faststart",
+            *build_muxer_args(hardening.VIDEO_EXT),
             self._video_path,
         ]
 
@@ -600,7 +639,7 @@ class CompressedStreamRecorder:
         )
 
     def _close_ffmpeg(self, wait_s: float = 30.0):
-        """Close the current ffmpeg; ``wait_s`` covers the faststart rewrite."""
+        """Close the current ffmpeg; ``wait_s`` covers the final cluster flush."""
         proc, self._proc = self._proc, None
         if proc is not None:
             try:
@@ -689,7 +728,9 @@ class CompressedStreamRecorder:
                 if not calibration_done([f[1] for f in self._calib_frames]):
                     return
                 self._calibrating = False
-                mux_fps = measured_fps([f[1] for f in self._calib_frames])
+                mux_fps = sustained_fps(
+                    [f[1] for f in self._calib_frames], fallback_fps=self._fps
+                )
                 if mux_fps <= 0:
                     mux_fps = self._fps
                 else:
@@ -697,8 +738,9 @@ class CompressedStreamRecorder:
                     if mux_fps < self._fps:
                         self.logger.warn(
                             f"[{self.topic}] Configured {self._fps}fps but only "
-                            f"measured {mux_fps}fps arriving; muxing at the "
-                            "measured rate to keep playback speed correct."
+                            f"{mux_fps}fps sustained after the first "
+                            f"{CALIBRATION_SETTLE_S:.0f}s; muxing at that rate to "
+                            "keep playback speed correct."
                         )
                 fmt = msg.format.lower() if msg.format else ""
                 if "jpeg" not in fmt and "jpg" not in fmt:
@@ -947,7 +989,7 @@ class ColourVideoRecorder(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    # SIGTERM/SIGHUP must finalise the mp4 (moov atom) rather than truncate it;
+    # SIGTERM/SIGHUP should finalise the Matroska file rather than truncate it;
     # the manager forwards SIGINT on a graceful stop, but a supervisor or a
     # killed terminal can send TERM/HUP directly. Installed before node
     # construction so the encoder probe is covered too.
